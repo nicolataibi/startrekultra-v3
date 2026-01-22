@@ -17,7 +17,9 @@ typedef struct {
     float h, m;
     int type; /* 1=Player, 3=Base, 4=Star, 5=Planet, 6=BH, 10+=Enemies */
     int ship_class;
-    int active; 
+    int active;
+    int health_pct;
+    int id;
 } SharedObject;
 
 typedef struct {

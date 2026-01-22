@@ -164,30 +164,46 @@ void *network_listener(void *arg) {
                     g_shared_state->objects[o].m = upd.objects[o].m;
                     g_shared_state->objects[o].type = upd.objects[o].type;
                     g_shared_state->objects[o].ship_class = upd.objects[o].ship_class;
+                    g_shared_state->objects[o].health_pct = upd.objects[o].health_pct;
+                    g_shared_state->objects[o].id = upd.objects[o].id;
                     g_shared_state->objects[o].active = 1;
                 }
-                g_shared_state->beam_count = upd.beam_count;
-                for (int b=0; b < upd.beam_count; b++) {
-                    g_shared_state->beams[b].shm_tx = upd.beams[b].tx;
-                    g_shared_state->beams[b].shm_ty = upd.beams[b].ty;
-                    g_shared_state->beams[b].shm_tz = upd.beams[b].tz;
-                    g_shared_state->beams[b].active = upd.beams[b].active;
+                
+                /* Append beams to shared state (Queue logic) */
+                if (upd.beam_count > 0) {
+                    for (int b=0; b < upd.beam_count; b++) {
+                        if (g_shared_state->beam_count < MAX_BEAMS) {
+                            int idx = g_shared_state->beam_count;
+                            g_shared_state->beams[idx].shm_tx = upd.beams[b].tx;
+                            g_shared_state->beams[idx].shm_ty = upd.beams[b].ty;
+                            g_shared_state->beams[idx].shm_tz = upd.beams[b].tz;
+                            g_shared_state->beams[idx].active = upd.beams[b].active;
+                            g_shared_state->beam_count++;
+                        }
+                    }
                 }
+                
+                /* Projectile position */
                 g_shared_state->torp.shm_x = upd.torp.shm_x;
                 g_shared_state->torp.shm_y = upd.torp.shm_y;
                 g_shared_state->torp.shm_z = upd.torp.shm_z;
                 g_shared_state->torp.active = upd.torp.active;
                 
-                g_shared_state->boom.shm_x = upd.boom.shm_x;
-                g_shared_state->boom.shm_y = upd.boom.shm_y;
-                g_shared_state->boom.shm_z = upd.boom.shm_z;
-                g_shared_state->boom.active = upd.boom.active;
+                /* Event Latching (Visualizer will clear these) */
+                if (upd.boom.active) {
+                    g_shared_state->boom.shm_x = upd.boom.shm_x;
+                    g_shared_state->boom.shm_y = upd.boom.shm_y;
+                    g_shared_state->boom.shm_z = upd.boom.shm_z;
+                    g_shared_state->boom.active = 1;
+                }
                 
-                g_shared_state->dismantle.shm_x = upd.dismantle.shm_x;
-                g_shared_state->dismantle.shm_y = upd.dismantle.shm_y;
-                g_shared_state->dismantle.shm_z = upd.dismantle.shm_z;
-                g_shared_state->dismantle.species = upd.dismantle.species;
-                g_shared_state->dismantle.active = upd.dismantle.active;
+                if (upd.dismantle.active) {
+                    g_shared_state->dismantle.shm_x = upd.dismantle.shm_x;
+                    g_shared_state->dismantle.shm_y = upd.dismantle.shm_y;
+                    g_shared_state->dismantle.shm_z = upd.dismantle.shm_z;
+                    g_shared_state->dismantle.species = upd.dismantle.species;
+                    g_shared_state->dismantle.active = 1;
+                }
                 
                 g_shared_state->frame_id++; 
                 pthread_mutex_unlock(&g_shared_state->mutex);
@@ -313,6 +329,7 @@ int main(int argc, char *argv[]) {
                     if (strcmp(g_input_buf, "help") == 0) {
                         printf(B_WHITE "\n--- STAR TREK ULTRA: MULTIPLAYER COMMANDS ---" RESET "\n");
                         printf("nav H M W   : Warp Navigation (Heading 0-359, Mark -90/90, Warp 0-8)\n");
+                        printf("imp H M S   : Impulse Drive (H, M, Speed 0.0-1.0). imp 0 0 0 to stop.\n");
                         printf("srs         : Short Range Sensors (Current Quadrant View)\n");
                         printf("lrs         : Long Range Sensors (3x3x3 Neighborhood Scan)\n");
                         printf("pha E       : Fire Phasers (Distance-based damage, uses Energy)\n");
@@ -329,6 +346,7 @@ int main(int argc, char *argv[]) {
                         printf("con T A     : Convert Resources (1:Dilithium->E, 3:Verterium->Torps)\n");
                         printf("rep ID      : Repair System (Uses Tritanium or Isolinear Crystals)\n");
                         printf("inv         : Cargo Inventory Report\n");
+                        printf("who         : List active captains in galaxy\n");
                         printf("cal QX QY QZ: Navigation Calculator\n");
                         printf("apr ID DIST : Approach target autopilot\n");
                         printf("sco         : Solar scooping for energy\n");

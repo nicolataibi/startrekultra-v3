@@ -31,8 +31,9 @@ float autoRotate = 0.075f;
 float pulse = 0.0f;
 
 int g_energy = 0, g_shields = 0, g_klingons = 0;
-int g_show_axes = 1;
+int g_show_axes = 0;
 int g_show_grid = 0;
+int g_show_hud = 1; /* Default HUD ON */
 char g_quadrant[128] = "Scanning...";
 char g_last_quadrant[128] = "";
 
@@ -44,6 +45,8 @@ typedef struct {
     float th, tm;     /* Target heading and mark */
     int type;
     int ship_class;
+    int health_pct;   /* HUD */
+    int id;           /* HUD */
     float trail[MAX_TRAIL][3];
     int trail_ptr;
     int trail_count;
@@ -73,9 +76,9 @@ typedef struct { float x, y, z, alpha; } PhaserBeam;
 PhaserBeam beams[10];
 int beamCount = 0;
 
-typedef struct { float x, y, z; int active; } ViewPoint;
-ViewPoint g_torp = {0,0,0,0};
-ViewPoint g_boom = {0,0,0,0};
+typedef struct { float x, y, z; int active; int timer; } ViewPoint;
+ViewPoint g_torp = {0,0,0,0,0};
+ViewPoint g_boom = {0,0,0,0,0};
 
 float enterpriseX = -100, enterpriseY = -100, enterpriseZ = -100;
 
@@ -173,7 +176,13 @@ void loadGameState() {
     for(int s=0; s<6; s++) total_s += g_shared_state->shm_shields[s];
     g_shields = total_s / 6;
     g_klingons = g_shared_state->klingons;
-    strcpy(g_quadrant, g_shared_state->quadrant);
+    
+    int quadrant_changed = 0;
+    if (strcmp(g_quadrant, g_shared_state->quadrant) != 0) {
+        quadrant_changed = 1;
+        strcpy(g_quadrant, g_shared_state->quadrant);
+    }
+    
     g_show_axes = g_shared_state->shm_show_axes;
     g_show_grid = g_shared_state->shm_show_grid;
     objectCount = g_shared_state->object_count;
@@ -186,10 +195,14 @@ void loadGameState() {
         float dx = next_x - objects[i].x;
         float dy = next_y - objects[i].y;
         float dz = next_z - objects[i].z;
-        if (objects[i].x < -50.0f || (dx*dx + dy*dy + dz*dz) > 25.0f) {
+        
+        if (quadrant_changed || objects[i].x < -50.0f || (dx*dx + dy*dy + dz*dz) > 25.0f) {
             objects[i].x = objects[i].tx = next_x;
             objects[i].y = objects[i].ty = next_y;
             objects[i].z = objects[i].tz = next_z;
+            /* Reset trails on quadrant jump */
+            objects[i].trail_count = 0;
+            objects[i].trail_ptr = 0;
         } else {
             objects[i].tx = next_x;
             objects[i].ty = next_y;
@@ -200,7 +213,9 @@ void loadGameState() {
         objects[i].tm = g_shared_state->objects[i].m;
         objects[i].last_update_time = glutGet(GLUT_ELAPSED_TIME);
         objects[i].type = g_shared_state->objects[i].type;
-        objects[i].ship_class = g_shared_state->objects[i].ship_class; 
+        objects[i].ship_class = g_shared_state->objects[i].ship_class;
+        objects[i].health_pct = g_shared_state->objects[i].health_pct;
+        objects[i].id = g_shared_state->objects[i].id; 
         if (i == 0) { enterpriseX = objects[i].x; enterpriseY = objects[i].y; enterpriseZ = objects[i].z; }
     }
     if (g_shared_state->beam_count > 0) {
@@ -213,6 +228,8 @@ void loadGameState() {
             beams[slot].z = 5.5f - g_shared_state->beams[i].shm_ty;
             beams[slot].alpha = 1.5f;
         }
+        /* Consume events */
+        g_shared_state->beam_count = 0;
     }
     if (g_shared_state->torp.active) {
         g_torp.x = g_shared_state->torp.shm_x - 5.5f;
@@ -225,7 +242,10 @@ void loadGameState() {
         g_boom.y = g_shared_state->boom.shm_z - 5.5f;
         g_boom.z = 5.5f - g_shared_state->boom.shm_y;
         g_boom.active = 1;
-    } else g_boom.active = 0;
+        g_boom.timer = 40; /* 1.3 seconds approx */
+        /* Consume event */
+        g_shared_state->boom.active = 0;
+    }
 
     /* Dismantle */
     if (g_shared_state->dismantle.active) {
@@ -246,6 +266,8 @@ void loadGameState() {
             g_dismantle.particles[i].b = (rand()%100)/100.0f;
             g_dismantle.particles[i].active = 1;
         }
+        /* Reset event to prevent re-triggering */
+        g_shared_state->dismantle.active = 0;
     }
     pthread_mutex_unlock(&g_shared_state->mutex);
     kill(getppid(), SIGUSR2);
@@ -255,6 +277,79 @@ void loadGameState() {
 void drawText3D(float x, float y, float z, const char* text) {
     glRasterPos3f(x, y, z);
     for(int i=0; i<strlen(text); i++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, text[i]);
+}
+
+const char* getSpeciesName(int s) {
+    switch(s) {
+        case 1: return "Player"; case 3: return "Starbase"; case 4: return "Star"; case 5: return "Planet"; case 6: return "Black Hole";
+        case 10: return "Klingon"; case 11: return "Romulan"; case 12: return "Borg";
+        case 13: return "Cardassian"; case 14: return "Jem'Hadar"; case 15: return "Tholian";
+        case 16: return "Gorn"; case 17: return "Ferengi"; case 18: return "Species 8472";
+        case 19: return "Breen"; case 20: return "Hirogen";
+        default: return "Unknown";
+    }
+}
+
+void drawHUD(float x, float y, float z, int type, int id, int hp) {
+    GLdouble model[16], proj[16];
+    GLint view[4];
+    GLdouble winX, winY, winZ;
+
+    glGetDoublev(GL_MODELVIEW_MATRIX, model);
+    glGetDoublev(GL_PROJECTION_MATRIX, proj);
+    glGetIntegerv(GL_VIEWPORT, view);
+
+    if (gluProject(x, y, z + 0.8f, model, proj, view, &winX, &winY, &winZ) == GL_TRUE) {
+        /* Check if behind camera */
+        if (winZ > 1.0) return;
+
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+        gluOrtho2D(0, view[2], 0, view[3]);
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+        glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+
+        /* Draw Name/ID */
+        char buf[64];
+        if (type == 1) sprintf(buf, "Vessel %d (Player)", id);
+        else sprintf(buf, "%s [%d]", getSpeciesName(type), id);
+        
+        glColor3f(0.0f, 1.0f, 1.0f);
+        glRasterPos2f(winX - (strlen(buf)*4), winY + 15);
+        for(int i=0; i<strlen(buf); i++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_10, buf[i]);
+
+        /* Draw Health Bar (Only for ships/bases) */
+        if (type == 1 || type == 3 || type >= 10) {
+            float w = 40.0f;
+            float h = 4.0f;
+            float bar = (hp / 100.0f) * w;
+            if (bar < 0) bar = 0; if (bar > w) bar = w;
+
+            /* Border */
+            glColor3f(0.5f, 0.5f, 0.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(winX - w/2, winY);
+            glVertex2f(winX + w/2, winY);
+            glVertex2f(winX + w/2, winY + h);
+            glVertex2f(winX - w/2, winY + h);
+            glEnd();
+
+            /* Fill */
+            if (hp > 50) glColor3f(0.0f, 1.0f, 0.0f);
+            else if (hp > 25) glColor3f(1.0f, 1.0f, 0.0f);
+            else glColor3f(1.0f, 0.0f, 0.0f);
+
+            glBegin(GL_QUADS);
+            glVertex2f(winX - w/2, winY);
+            glVertex2f(winX - w/2 + bar, winY);
+            glVertex2f(winX - w/2 + bar, winY + h);
+            glVertex2f(winX - w/2, winY + h);
+            glEnd();
+        }
+
+        glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING);
+        glMatrixMode(GL_PROJECTION); glPopMatrix();
+        glMatrixMode(GL_MODELVIEW); glPopMatrix();
+    }
 }
 
 void drawCompass() {
@@ -295,9 +390,25 @@ void drawNavLights(float x, float y, float z) {
 }
 
 void drawNacelle(float len, float width, float r, float g, float b) {
-    glPushMatrix(); glScalef(len, width, width); glColor3f(0.4f, 0.4f, 0.45f); glutSolidSphere(0.1, 16, 16);
-    glPushMatrix(); glTranslatef(-0.05f, 0, 0); drawGlow(0.08f, r, g, b, 0.4f); glPopMatrix();
-    glPushMatrix(); glTranslatef(0.45f, 0, 0); glColor3f(0.8f, 0.0f, 0.0f); glutSolidSphere(0.07, 12, 12); drawGlow(0.06f, 1.0f, 0.2f, 0.0f, 0.3f); glPopMatrix();
+    /* Corpo della gondola (Scalato) */
+    glPushMatrix(); 
+    glScalef(len, width, width); 
+    glColor3f(0.4f, 0.4f, 0.45f); 
+    glutSolidSphere(0.1, 16, 16); 
+    glPopMatrix();
+
+    /* Glow posteriore (Non deformato, posizionato alla fine) */
+    glPushMatrix(); 
+    glTranslatef(-0.1f * len, 0, 0); 
+    drawGlow(0.07f, r, g, b, 0.3f); 
+    glPopMatrix();
+
+    /* Collettore di Bussard anteriore (Non deformato, sferico, posizionato in punta) */
+    glPushMatrix(); 
+    glTranslatef(0.1f * len, 0, 0); 
+    glColor3f(0.8f, 0.0f, 0.0f); 
+    glutSolidSphere(0.04, 12, 12); 
+    drawGlow(0.05f, 1.0f, 0.2f, 0.0f, 0.3f); 
     glPopMatrix();
 }
 
@@ -307,7 +418,14 @@ void drawDeflector(float r, float g, float b) {
 
 void drawStarfleetSaucer(float sx, float sy, float sz) {
     glPushMatrix(); glScalef(sx, sy, sz); drawHullDetail(glutSolidSphere_wrapper_saucer, 0.88f, 0.88f, 0.92f); glPopMatrix();
-    drawNavLights(0, 0, sz * 0.45f);
+    
+    /* Luci di posizione superiori */
+    glDisable(GL_LIGHTING);
+    glColor3f(1.0f, 0.0f, 0.0f); /* Rosso (Port) */
+    glPushMatrix(); glTranslatef(0, 0.12f, 0.2f); glutSolidSphere(0.02, 8, 8); glPopMatrix();
+    glColor3f(0.0f, 1.0f, 0.0f); /* Verde (Starboard) */
+    glPushMatrix(); glTranslatef(0, 0.12f, -0.2f); glutSolidSphere(0.02, 8, 8); glPopMatrix();
+    glEnable(GL_LIGHTING);
 }
 
 void drawConstitution() {
@@ -520,6 +638,28 @@ void drawStarbase(float x, float y, float z) {
     glColor3f(0.5f, 0.5f, 0.5f); glPushMatrix(); glScalef(1.5f, 0.1f, 1.5f); glutSolidCube(0.6); glPopMatrix();
 }
 
+void drawStar(float x, float y, float z) {
+    glPushMatrix();
+    /* Core (Bright White-Yellow) */
+    glDisable(GL_LIGHTING);
+    glColor3f(1.0f, 1.0f, 0.8f); 
+    glutSolidSphere(0.2, 16, 16);
+    
+    /* Corona / Halo (Pulsing Yellow-Orange) */
+    float p = 1.0f + sin(pulse * 3.0f) * 0.1f; /* Pulsazione */
+    
+    /* Inner Corona */
+    glColor4f(1.0f, 0.8f, 0.0f, 0.4f);
+    glutSolidSphere(0.35 * p, 24, 24);
+    
+    /* Outer Corona (Fading) */
+    glColor4f(1.0f, 0.6f, 0.0f, 0.2f);
+    glutSolidSphere(0.6 * p, 24, 24);
+
+    glEnable(GL_LIGHTING);
+    glPopMatrix();
+}
+
 void drawPlanet(float x, float y, float z) {
     glRotatef(pulse*5, 0, 1, 0); glColor3f(0.2f, 0.6f, 0.3f); glutSolidSphere(0.6, 24, 24);
     glDisable(GL_LIGHTING); glColor4f(0.4f, 0.8f, 1.0f, 0.3f); glutSolidSphere(0.65, 24, 24); glEnable(GL_LIGHTING);
@@ -588,10 +728,14 @@ void drawPhaserBeams() {
 }
 
 void drawExplosion() {
-    if (!g_boom.active) return;
+    if (g_boom.timer <= 0) return;
     glDisable(GL_LIGHTING);
     glPushMatrix(); glTranslatef(g_boom.x, g_boom.y, g_boom.z);
-    glColor3f(1, 0.5, 0); glutSolidSphere(0.5, 16, 16);
+    /* Pulsing expansion */
+    float s = 0.5f + (40 - g_boom.timer) * 0.05f;
+    float alpha = g_boom.timer / 40.0f;
+    glColor4f(1.0f, 0.5f, 0.0f, alpha); 
+    glutSolidSphere(s, 16, 16);
     glPopMatrix(); glEnable(GL_LIGHTING);
 }
 
@@ -599,7 +743,14 @@ void drawTorpedo() {
     if (!g_torp.active) return;
     glDisable(GL_LIGHTING);
     glPushMatrix(); glTranslatef(g_torp.x, g_torp.y, g_torp.z);
-    glColor3f(1, 1, 1); glutSolidSphere(0.1, 8, 8);
+    
+    /* Core */
+    glColor3f(1.0f, 0.8f, 0.6f); 
+    glutSolidSphere(0.08, 8, 8);
+    
+    /* Glow */
+    drawGlow(0.15f, 1.0f, 0.2f, 0.0f, 0.6f);
+    
     glPopMatrix(); glEnable(GL_LIGHTING);
 }
 
@@ -648,7 +799,7 @@ void display() {
             glRotatef(objects[i].h - 90.0f, 0, 1, 0); glRotatef(objects[i].m, 0, 0, 1);
             switch(objects[i].type) {
                 case 3: drawStarbase(0,0,0); break;
-                case 4: glDisable(GL_LIGHTING); glColor4f(1.0f, 1.0f, 0.2f, 1.0f); glutSolidSphere(0.25, 12, 12); glEnable(GL_LIGHTING); break;
+                case 4: drawStar(0,0,0); break;
                 case 5: drawPlanet(0,0,0); break;
                 case 6: drawBlackHole(0,0,0); break;
                 case 10: drawKlingon(0,0,0); break;
@@ -666,6 +817,16 @@ void display() {
         }
         glPopMatrix();
     }
+    
+    /* Draw HUD Overlay */
+    if (g_show_hud) {
+        for(int i=0; i<objectCount; i++) {
+            if (objects[i].type != 0 && !g_is_loading) {
+                drawHUD(objects[i].x, objects[i].y, objects[i].z, objects[i].type, objects[i].id, objects[i].health_pct);
+            }
+        }
+    }
+
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, 1000, 0, 1000); glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
     glDisable(GL_LIGHTING); glColor3f(0, 1, 1); drawText3D(20, 960, 0, "STAR TREK ULTRA: MULTI-USER TACTICAL");
     char buf[256]; sprintf(buf, "QUADRANT: %s", g_quadrant); drawText3D(20, 930, 0, buf);
@@ -673,7 +834,7 @@ void display() {
     sprintf(buf, "ENEMIES REMAINING: %d", g_klingons); drawText3D(20, 880, 0, buf);
     
     glColor3f(1, 1, 1);
-    drawText3D(20, 50, 0, "Arrows: Rotate | W/S: Zoom | SPACE: Pause | ESC: Exit");
+    drawText3D(20, 50, 0, "Arrows: Rotate | W/S: Zoom | SPACE: Pause | H: Toggle HUD | ESC: Exit");
 
     glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW); glPopMatrix();
     glEnable(GL_LIGHTING); glutSwapBuffers();
@@ -684,6 +845,9 @@ void timer(int v) {
     
     /* Fade out beams */
     for (int i = 0; i < 10; i++) if (beams[i].alpha > 0) beams[i].alpha -= 0.05f;
+
+    /* Update Boom Timer */
+    if (g_boom.timer > 0) g_boom.timer--;
 
     /* Update Dismantle */
     if (g_dismantle.timer > 0) {
@@ -718,18 +882,21 @@ void timer(int v) {
         if (i == 0) { enterpriseX = objects[i].x; enterpriseY = objects[i].y; enterpriseZ = objects[i].z; }
 
         if (objects[i].type == 1 || objects[i].type >= 10) {
-            float lastX = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][0];
-            float lastY = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][1];
-            float lastZ = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][2];
+            /* Check for jump only if we have a history */
+            if (objects[i].trail_count > 0) {
+                float lastX = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][0];
+                float lastY = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][1];
+                float lastZ = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][2];
 
-            /* Rilevamento salto (cambio quadrante o teletrasporto) */
-            float dx = objects[i].x - lastX;
-            float dy = objects[i].y - lastY;
-            float dz = objects[i].z - lastZ;
-            float dist_sq = dx*dx + dy*dy + dz*dz;
-            if (dist_sq > 25.0f) {
-                objects[i].trail_count = 0;
-                objects[i].trail_ptr = 0;
+                /* Rilevamento salto (cambio quadrante o teletrasporto) */
+                float dx = objects[i].x - lastX;
+                float dy = objects[i].y - lastY;
+                float dz = objects[i].z - lastZ;
+                float dist_sq = dx*dx + dy*dy + dz*dz;
+                if (dist_sq > 25.0f) {
+                    objects[i].trail_count = 0;
+                    objects[i].trail_ptr = 0;
+                }
             }
 
             static int trail_tick = 0;
@@ -752,6 +919,7 @@ void keyboard(unsigned char k, int x, int y) {
     if(k==' ') autoRotate=(autoRotate==0)?0.15:0; 
     if(k=='w' || k=='W') zoom += 0.5f;
     if(k=='s' || k=='S') zoom -= 0.5f;
+    if(k=='h' || k=='H') g_show_hud = !g_show_hud;
 }
 void special(int k, int x, int y) { if(k==GLUT_KEY_UP) angleX-=5; if(k==GLUT_KEY_DOWN) angleX+=5; if(k==GLUT_KEY_LEFT) angleY-=5; if(k==GLUT_KEY_RIGHT) angleY+=5; }
 

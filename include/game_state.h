@@ -17,6 +17,8 @@ typedef struct {
     int type;       /* 1=Player, 3=Base, 4=Star, 5=Planet, etc */
     int ship_class; /* Specifica il modello 3D (es. Galaxy, Constitution) */
     int active;
+    int health_pct; /* 0-100% Health/Energy status for HUD */
+    int id;         /* Universal Target ID */
 } NetObject;
 
 typedef struct {

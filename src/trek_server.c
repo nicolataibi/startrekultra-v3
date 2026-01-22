@@ -15,7 +15,8 @@ typedef enum {
     NAV_STATE_IDLE = 0,
     NAV_STATE_ALIGN,
     NAV_STATE_WARP,
-    NAV_STATE_REALIGN
+    NAV_STATE_REALIGN,
+    NAV_STATE_IMPULSE
 } NavState;
 
 typedef struct {
@@ -41,9 +42,15 @@ typedef struct {
     StarTrekGame state; 
 } ConnectedPlayer;
 
+typedef enum {
+    AI_STATE_PATROL = 0,
+    AI_STATE_CHASE,
+    AI_STATE_FLEE
+} AIState;
+
 typedef struct { int id, faction, q1, q2, q3; double x, y, z; int active; } NPCStar;
 typedef struct { int id, q1, q2, q3; double x, y, z; int active; } NPCBlackHole;
-typedef struct { int id, faction, q1, q2, q3; double x, y, z, h, m; int energy, active; } NPCShip;
+typedef struct { int id, faction, q1, q2, q3; double x, y, z, h, m; int energy, active; int fire_cooldown; AIState ai_state; int target_player_idx; int nav_timer; double dx, dy, dz; } NPCShip;
 typedef struct { int id, q1, q2, q3; double x, y, z; int resource_type, amount, active; } NPCPlanet;
 typedef struct { int id, faction, q1, q2, q3; double x, y, z; int health, active; } NPCBase;
 
@@ -60,6 +67,42 @@ NPCBase bases[MAX_BASES];
 NPCShip npcs[MAX_NPC];
 ConnectedPlayer players[MAX_CLIENTS];
 StarTrekGame galaxy_master;
+
+void save_galaxy() {
+    FILE *f = fopen("galaxy.dat", "wb");
+    if (!f) { perror("Failed to open galaxy.dat for writing"); return; }
+    fwrite(&galaxy_master, sizeof(StarTrekGame), 1, f);
+    fwrite(npcs, sizeof(NPCShip), MAX_NPC, f);
+    fwrite(stars_data, sizeof(NPCStar), MAX_STARS, f);
+    fwrite(black_holes, sizeof(NPCBlackHole), MAX_BH, f);
+    fwrite(planets, sizeof(NPCPlanet), MAX_PLANETS, f);
+    fwrite(bases, sizeof(NPCBase), MAX_BASES, f);
+    fwrite(players, sizeof(ConnectedPlayer), MAX_CLIENTS, f);
+    fclose(f);
+    printf("--- GALAXY STATE PERSISTED TO DISK ---\n");
+}
+
+int load_galaxy() {
+    FILE *f = fopen("galaxy.dat", "rb");
+    if (!f) return 0;
+    fread(&galaxy_master, sizeof(StarTrekGame), 1, f);
+    fread(npcs, sizeof(NPCShip), MAX_NPC, f);
+    fread(stars_data, sizeof(NPCStar), MAX_STARS, f);
+    fread(black_holes, sizeof(NPCBlackHole), MAX_BH, f);
+    fread(planets, sizeof(NPCPlanet), MAX_PLANETS, f);
+    fread(bases, sizeof(NPCBase), MAX_BASES, f);
+    fread(players, sizeof(ConnectedPlayer), MAX_CLIENTS, f);
+    fclose(f);
+    
+    /* Reset transient network data for loaded players */
+    for(int i=0; i<MAX_CLIENTS; i++) {
+        players[i].active = 0;
+        players[i].socket = 0;
+    }
+    
+    printf("--- PERSISTENT GALAXY LOADED SUCCESSFULLY ---\n");
+    return 1;
+}
 
 const char* get_species_name(int s) {
     switch(s) {
@@ -90,7 +133,7 @@ void generate_galaxy() {
                 int actual_k = 0, actual_b = 0, actual_p = 0, actual_s = 0, actual_bh = 0;
                 
                 for(int e=0; e<kling && n_count < MAX_NPC; e++) {
-                    npcs[n_count] = (NPCShip){n_count, 10+(rand()%11), i,j,l, (rand()%100)/10.0, (rand()%100)/10.0, (rand()%100)/10.0, 0,0, 1000, 1}; n_count++; actual_k++;
+                    npcs[n_count] = (NPCShip){n_count, 10+(rand()%11), i,j,l, (rand()%100)/10.0, (rand()%100)/10.0, (rand()%100)/10.0, 0,0, 1000, 1, 60 + rand()%241, AI_STATE_PATROL, -1, 0, 0,0,0}; n_count++; actual_k++;
                 }
                 for(int b=0; b<base && b_count < MAX_BASES; b++) {
                     bases[b_count] = (NPCBase){b_count, FACTION_FEDERATION, i,j,l, (rand()%100)/10.0, (rand()%100)/10.0, (rand()%100)/10.0, 5000, 1}; b_count++; actual_b++;
@@ -179,8 +222,12 @@ void *game_loop(void *arg) {
                     double dy = black_holes[h].y - players[i].state.s2;
                     double dz = black_holes[h].z - players[i].state.s3;
                     if((dx*dx + dy*dy + dz*dz) < 2.25) { /* 1.5 units safety margin */
-                        send_server_msg(i, "COMPUTER", "EMERGENCY: Gravitational shear detected. Dropping out of Warp.");
-                        emergency_stop = true; break;
+                        /* Check if moving AWAY: dot product < 0 */
+                        double dot = dx * players[i].dx + dy * players[i].dy + dz * players[i].dz;
+                        if (dot > 0) { /* Moving towards or perpendicular */
+                            send_server_msg(i, "COMPUTER", "EMERGENCY: Gravitational shear detected. Dropping out of Warp.");
+                            emergency_stop = true; break;
+                        }
                     }
                 }
                 /* Check for Stars in current quadrant */
@@ -190,8 +237,12 @@ void *game_loop(void *arg) {
                         double dy = stars_data[s].y - players[i].state.s2;
                         double dz = stars_data[s].z - players[i].state.s3;
                         if((dx*dx + dy*dy + dz*dz) < 1.44) { /* 1.2 units safety margin */
-                            send_server_msg(i, "COMPUTER", "EMERGENCY: Solar proximity warning. Warp drive disengaged.");
-                            emergency_stop = true; break;
+                            /* Check if moving AWAY */
+                            double dot = dx * players[i].dx + dy * players[i].dy + dz * players[i].dz;
+                            if (dot > 0) {
+                                send_server_msg(i, "COMPUTER", "EMERGENCY: Solar proximity warning. Warp drive disengaged.");
+                                emergency_stop = true; break;
+                            }
                         }
                     }
                 }
@@ -206,6 +257,18 @@ void *game_loop(void *arg) {
                     cur_gy += players[i].dy * players[i].warp_speed;
                     cur_gz += players[i].dz * players[i].warp_speed;
 
+                    /* Galaxy Boundary Check */
+                    bool barrier_hit = false;
+                    if (cur_gx < 0) { cur_gx = 0.1; barrier_hit = true; } else if (cur_gx >= 100.0) { cur_gx = 99.9; barrier_hit = true; }
+                    if (cur_gy < 0) { cur_gy = 0.1; barrier_hit = true; } else if (cur_gy >= 100.0) { cur_gy = 99.9; barrier_hit = true; }
+                    if (cur_gz < 0) { cur_gz = 0.1; barrier_hit = true; } else if (cur_gz >= 100.0) { cur_gz = 99.9; barrier_hit = true; }
+
+                    if (barrier_hit) {
+                        send_server_msg(i, "HELMSMAN", "Galactic Barrier reached. Disengaging Warp.");
+                        players[i].nav_state = NAV_STATE_REALIGN;
+                        players[i].nav_timer = 30;
+                    }
+
                     players[i].state.q1 = (int)(cur_gx / 10.0) + 1;
                     players[i].state.q2 = (int)(cur_gy / 10.0) + 1;
                     players[i].state.q3 = (int)(cur_gz / 10.0) + 1;
@@ -213,7 +276,7 @@ void *game_loop(void *arg) {
                     players[i].state.s2 = fmod(cur_gy, 10.0);
                     players[i].state.s3 = fmod(cur_gz, 10.0);
 
-                    if (players[i].nav_timer <= 0) {
+                    if (!barrier_hit && players[i].nav_timer <= 0) {
                         players[i].nav_state = NAV_STATE_REALIGN;
                         players[i].nav_timer = 60; /* 2 secondi per tornare a mark 0 */
                         players[i].start_h = players[i].state.ent_h;
@@ -228,10 +291,68 @@ void *game_loop(void *arg) {
                 /* Torniamo a Mark 0, Heading rimane invariato */
                 players[i].state.ent_m = players[i].start_m * (1.0 - t);
                 
-                if (players[i].nav_timer <= 0) {
-                    players[i].state.ent_m = 0;
+                    if (players[i].nav_timer <= 0) {
+                        players[i].state.ent_m = 0;
+                        players[i].nav_state = NAV_STATE_IDLE;
+                        send_server_msg(i, "HELMSMAN", "Stabilized at sub-light speed.");
+                    }
+            }
+            else if (players[i].nav_state == NAV_STATE_IMPULSE) {
+                /* Impulse Engine Logic */
+                if (players[i].state.energy > 0) {
+                    players[i].state.energy -= 1; /* Low consumption */
+                    
+                    double dx = players[i].dx * players[i].warp_speed; /* Reusing warp_speed var for impulse speed */
+                    double dy = players[i].dy * players[i].warp_speed;
+                    double dz = players[i].dz * players[i].warp_speed;
+                    
+                    /* Predict position */
+                    double next_s1 = players[i].state.s1 + dx;
+                    double next_s2 = players[i].state.s2 + dy;
+                    double next_s3 = players[i].state.s3 + dz;
+                    
+                    /* Boundary Check - Wrap or Stop? Sector 0-10 */
+                    /* Save previous state to revert if we hit the wall */
+                    int old_q1 = players[i].state.q1, old_q2 = players[i].state.q2, old_q3 = players[i].state.q3;
+                    double old_s1 = players[i].state.s1, old_s2 = players[i].state.s2, old_s3 = players[i].state.s3;
+
+                    /* If leaving sector, update quadrant */
+                    if (next_s1 >= 10.0) { players[i].state.q1++; next_s1 -= 10.0; }
+                    else if (next_s1 < 0.0) { players[i].state.q1--; next_s1 += 10.0; }
+                    if (next_s2 >= 10.0) { players[i].state.q2++; next_s2 -= 10.0; }
+                    else if (next_s2 < 0.0) { players[i].state.q2--; next_s2 += 10.0; }
+                    if (next_s3 >= 10.0) { players[i].state.q3++; next_s3 -= 10.0; }
+                    else if (next_s3 < 0.0) { players[i].state.q3--; next_s3 += 10.0; }
+                    
+                    /* Galaxy Limits Check */
+                    if (players[i].state.q1 < 1 || players[i].state.q1 > 10 || 
+                        players[i].state.q2 < 1 || players[i].state.q2 > 10 || 
+                        players[i].state.q3 < 1 || players[i].state.q3 > 10) {
+                        
+                        /* Hit the wall - Revert position */
+                        players[i].state.q1 = old_q1; players[i].state.q2 = old_q2; players[i].state.q3 = old_q3;
+                        players[i].state.s1 = old_s1; players[i].state.s2 = old_s2; players[i].state.s3 = old_s3;
+                        
+                        send_server_msg(i, "HELMSMAN", "Galactic Barrier reached. Course corrected.");
+                        players[i].nav_state = NAV_STATE_IDLE;
+                    } else {
+                        /* Collision Check (Basic) */
+                        bool collision = false;
+                        for(int s=0; s<MAX_STARS; s++) if(stars_data[s].active && stars_data[s].q1==players[i].state.q1 && stars_data[s].q2==players[i].state.q2 && stars_data[s].q3==players[i].state.q3) {
+                            double d = sqrt(pow(stars_data[s].x-next_s1,2)+pow(stars_data[s].y-next_s2,2)+pow(stars_data[s].z-next_s3,2));
+                            if (d < 0.8) { collision = true; send_server_msg(i, "HELMSMAN", "Collision alert! All stop."); break; }
+                        }
+                        if (!collision) {
+                            players[i].state.s1 = next_s1;
+                            players[i].state.s2 = next_s2;
+                            players[i].state.s3 = next_s3;
+                        } else {
+                            players[i].nav_state = NAV_STATE_IDLE;
+                        }
+                    }
+                } else {
+                    send_server_msg(i, "ENGINEERING", "Impulse engines offline. Energy depleted.");
                     players[i].nav_state = NAV_STATE_IDLE;
-                    send_server_msg(i, "HELMSMAN", "Stabilized at sub-light speed.");
                 }
             }
             /* Collisioni e stress ambientali */
@@ -251,10 +372,6 @@ void *game_loop(void *arg) {
                 }
             }
 
-            if (players[i].state.beam_count > 0) players[i].state.beam_count = 0;
-            if (players[i].state.boom.active) players[i].state.boom.active = 0;
-            if (players[i].state.dismantle.active) players[i].state.dismantle.active = 0;
-            
             static int global_tick = 0;
             if (global_tick % 60 == 0) {
                 /* Effetti Power Distribution: 0:Engines, 1:Shields, 2:Weapons */
@@ -289,7 +406,11 @@ void *game_loop(void *arg) {
 
                 for(int s=0; s<8; s++) if(players[i].state.system_health[s]<100) players[i].state.system_health[s]+=0.1;
             }
-            if (i == MAX_CLIENTS - 1) global_tick++;
+            if (i == MAX_CLIENTS - 1) {
+                global_tick++;
+                /* Auto-save every 60 seconds (1800 ticks at 30 FPS) */
+                if (global_tick % 1800 == 0) save_galaxy();
+            }
 
             if (players[i].torp_active) {
                 players[i].tx += players[i].tdx * 0.8; players[i].ty += players[i].tdy * 0.8; players[i].tz += players[i].tdz * 0.8;
@@ -349,25 +470,97 @@ void *game_loop(void *arg) {
                 if (players[i].tx<0||players[i].tx>10||players[i].ty<0||players[i].ty>10||players[i].tz<0||players[i].tz>10) { players[i].torp_active = false; players[i].state.torp.active = 0; }
             }
 
-            /* NPC AI: Reazione dei nemici (Ottimizzata) */
-            static int ai_tick = 0;
-            if (ai_tick % 30 == 0) {
-                for (int n=0; n<MAX_NPC; n++) if (npcs[n].active && npcs[n].q1 == players[i].state.q1 && npcs[n].q2 == players[i].state.q2 && npcs[n].q3 == players[i].state.q3) {
-                    double dx = npcs[n].x-players[i].state.s1;
-                    double dy = npcs[n].y-players[i].state.s2;
-                    double dz = npcs[n].z-players[i].state.s3;
-                    double d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 < 25.0 && !players[i].state.is_cloaked) {
+            /* NPC AI: State Machine & Independent Fire */
+            for (int n=0; n<MAX_NPC; n++) if (npcs[n].active && npcs[n].q1 == players[i].state.q1 && npcs[n].q2 == players[i].state.q2 && npcs[n].q3 == players[i].state.q3) {
+                
+                /* 1. Sensing & State Transitions */
+                int closest_player = -1;
+                double min_dist2 = 100.0; /* 10 units sensor range */
+                
+                for(int p=0; p<MAX_CLIENTS; p++) if(players[p].active && players[p].state.q1==npcs[n].q1 && players[p].state.q2==npcs[n].q2 && players[p].state.q3==npcs[n].q3 && !players[p].state.is_cloaked) {
+                    double d2 = pow(npcs[n].x - players[p].state.s1, 2) + pow(npcs[n].y - players[p].state.s2, 2) + pow(npcs[n].z - players[p].state.s3, 2);
+                    if (d2 < min_dist2) { min_dist2 = d2; closest_player = p; }
+                }
+                
+                if (npcs[n].energy < 200) npcs[n].ai_state = AI_STATE_FLEE;
+                else if (closest_player != -1) { npcs[n].ai_state = AI_STATE_CHASE; npcs[n].target_player_idx = closest_player; }
+                else npcs[n].ai_state = AI_STATE_PATROL;
+                
+                /* 2. State-Specific Logic (Movement) */
+                if (npcs[n].ai_state == AI_STATE_PATROL) {
+                    if (npcs[n].nav_timer <= 0) {
+                        npcs[n].nav_timer = 100 + rand()%200;
+                        npcs[n].dx = ((rand()%100)-50)/1000.0; /* Slow drift */
+                        npcs[n].dy = ((rand()%100)-50)/1000.0;
+                        npcs[n].dz = ((rand()%100)-50)/1000.0;
+                    }
+                } 
+                else if (npcs[n].ai_state == AI_STATE_CHASE && npcs[n].target_player_idx != -1) {
+                    int p = npcs[n].target_player_idx;
+                    double tx = players[p].state.s1, ty = players[p].state.s2, tz = players[p].state.s3;
+                    double dxx = tx - npcs[n].x, dyy = ty - npcs[n].y, dzz = tz - npcs[n].z;
+                    double d = sqrt(dxx*dxx + dyy*dyy + dzz*dzz);
+                    if (d > 1.5) { /* Mantieni una minima distanza tattica */
+                        npcs[n].dx = (dxx/d) * 0.03; 
+                        npcs[n].dy = (dyy/d) * 0.03;
+                        npcs[n].dz = (dzz/d) * 0.03;
+                    } else { npcs[n].dx = npcs[n].dy = npcs[n].dz = 0; }
+                }
+                else if (npcs[n].ai_state == AI_STATE_FLEE && closest_player != -1) {
+                    int p = closest_player;
+                    double tx = players[p].state.s1, ty = players[p].state.s2, tz = players[p].state.s3;
+                    double dxx = npcs[n].x - tx, dyy = npcs[n].y - ty, dzz = npcs[n].z - tz; /* Move AWAY */
+                    double d = sqrt(dxx*dxx + dyy*dyy + dzz*dzz);
+                    if (d > 0.1) {
+                        npcs[n].dx = (dxx/d) * 0.05; 
+                        npcs[n].dy = (dyy/d) * 0.05;
+                        npcs[n].dz = (dzz/d) * 0.05;
+                    }
+                }
+                
+                /* Apply Movement & Sector Limit Check */
+                npcs[n].x += npcs[n].dx; npcs[n].y += npcs[n].dy; npcs[n].z += npcs[n].dz;
+                npcs[n].nav_timer--;
+                if (npcs[n].x < 0.5 || npcs[n].x > 9.5) npcs[n].dx *= -1;
+                if (npcs[n].y < 0.5 || npcs[n].y > 9.5) npcs[n].dy *= -1;
+                if (npcs[n].z < 0.5 || npcs[n].z > 9.5) npcs[n].dz *= -1;
+
+                /* 3. Fire Logic */
+                if (npcs[n].fire_cooldown > 0) npcs[n].fire_cooldown--;
+                
+                if (npcs[n].fire_cooldown <= 0) {
+                    double dx_fire = npcs[n].x-players[i].state.s1;
+                    double dy_fire = npcs[n].y-players[i].state.s2;
+                    double dz_fire = npcs[n].z-players[i].state.s3;
+                    double d2_fire = dx_fire*dx_fire + dy_fire*dy_fire + dz_fire*dz_fire;
+                    if (d2_fire < 36.0 && !players[i].state.is_cloaked) { 
                         /* Il nemico spara! */
                         players[i].state.beam_count = 1;
                         players[i].state.beams[0] = (NetBeam){(float)npcs[n].x, (float)npcs[n].y, (float)npcs[n].z, 1};
-                        int dmg = (int)(200.0 / sqrt(d2));
-                        for(int s=0; s<6; s++) players[i].state.shields[s] -= dmg/6;
-                        send_server_msg(i, "WARNING", "Incoming phaser fire!");
+                        int dmg = (int)(200.0 / sqrt(d2_fire));
+                        
+                        int damage_remaining = dmg;
+                        for(int s=0; s<6; s++) {
+                            if (damage_remaining <= 0) break;
+                            int absorbed = (players[i].state.shields[s] >= damage_remaining/6) ? damage_remaining/6 : players[i].state.shields[s];
+                            players[i].state.shields[s] -= absorbed;
+                            if (players[i].state.shields[s] < 0) players[i].state.shields[s] = 0; 
+                            damage_remaining -= absorbed;
+                        }
+                        
+                        if (damage_remaining > 0) {
+                            players[i].state.energy -= damage_remaining;
+                            send_server_msg(i, "DAMAGE CONTROL", "Shields failing! Taking hull damage.");
+                            if (players[i].state.energy <= 0) {
+                                players[i].state.energy = 0; players[i].active = 0;
+                                players[i].state.boom = (NetPoint){(float)players[i].state.s1, (float)players[i].state.s2, (float)players[i].state.s3, 1};
+                                send_server_msg(i, "COMPUTER", "CRITICAL FAILURE. Ship destroyed.");
+                            }
+                        } else { send_server_msg(i, "WARNING", "Incoming phaser fire! Shields holding."); }
+                        npcs[n].fire_cooldown = 60 + rand()%241;
                     }
                 }
             }
-            if (i == MAX_CLIENTS - 1) ai_tick++;
 
             PacketUpdate upd; 
             memset(&upd, 0, sizeof(PacketUpdate));
@@ -384,20 +577,33 @@ void *game_loop(void *arg) {
             upd.is_cloaked = players[i].state.is_cloaked;
             
             int obj_idx = 0;
-            upd.objects[obj_idx++] = (NetObject){(float)players[i].state.s1,(float)players[i].state.s2,(float)players[i].state.s3,(float)players[i].state.ent_h,(float)players[i].state.ent_m,1,players[i].ship_class,1};
+            /* Self */
+            upd.objects[obj_idx++] = (NetObject){(float)players[i].state.s1,(float)players[i].state.s2,(float)players[i].state.s3,(float)players[i].state.ent_h,(float)players[i].state.ent_m,1,players[i].ship_class,1, 
+                                                 (int)((players[i].state.energy / 3000.0) * 100), i+1};
+            
+            /* Other Players */
             for(int j=0; j<MAX_CLIENTS; j++) if (i!=j && players[j].active && players[j].state.q1==players[i].state.q1 && players[j].state.q2==players[i].state.q2 && players[j].state.q3==players[i].state.q3 && !players[j].state.is_cloaked && obj_idx < MAX_NET_OBJECTS) {
-                upd.objects[obj_idx++] = (NetObject){(float)players[j].state.s1,(float)players[j].state.s2,(float)players[j].state.s3,(float)players[j].state.ent_h,(float)players[j].state.ent_m,1,players[j].ship_class,1};
+                upd.objects[obj_idx++] = (NetObject){(float)players[j].state.s1,(float)players[j].state.s2,(float)players[j].state.s3,(float)players[j].state.ent_h,(float)players[j].state.ent_m,1,players[j].ship_class,1,
+                                                     (int)((players[j].state.energy / 3000.0) * 100), j+1};
             }
+            
+            /* NPCs */
             for(int n=0; n<MAX_NPC; n++) if(npcs[n].active && npcs[n].q1==players[i].state.q1 && npcs[n].q2==players[i].state.q2 && npcs[n].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.objects[obj_idx++] = (NetObject){(float)npcs[n].x,(float)npcs[n].y,(float)npcs[n].z,0,0,npcs[n].faction,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)npcs[n].x,(float)npcs[n].y,(float)npcs[n].z,0,0,npcs[n].faction,0,1,
+                                                     (int)((npcs[n].energy / 1000.0) * 100), n+100};
+            
+            /* Bases */
             for(int b=0; b<MAX_BASES; b++) if(bases[b].active && bases[b].q1==players[i].state.q1 && bases[b].q2==players[i].state.q2 && bases[b].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.objects[obj_idx++] = (NetObject){(float)bases[b].x,(float)bases[b].y,(float)bases[b].z,0,0,3,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)bases[b].x,(float)bases[b].y,(float)bases[b].z,0,0,3,0,1,
+                                                     (int)((bases[b].health / 5000.0) * 100), b+500};
+            
+            /* Planets, Stars, Black Holes (No health bar, but ID) */
             for(int p=0; p<MAX_PLANETS; p++) if(planets[p].active && planets[p].q1==players[i].state.q1 && planets[p].q2==players[i].state.q2 && planets[p].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.objects[obj_idx++] = (NetObject){(float)planets[p].x,(float)planets[p].y,(float)planets[p].z,0,0,5,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)planets[p].x,(float)planets[p].y,(float)planets[p].z,0,0,5,0,1, 0, p+1000};
             for(int s=0; s<MAX_STARS; s++) if(stars_data[s].active && stars_data[s].q1==players[i].state.q1 && stars_data[s].q2==players[i].state.q2 && stars_data[s].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.objects[obj_idx++] = (NetObject){(float)stars_data[s].x,(float)stars_data[s].y,(float)stars_data[s].z,0,0,4,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)stars_data[s].x,(float)stars_data[s].y,(float)stars_data[s].z,0,0,4,0,1, 0, s+2000};
             for(int h=0; h<MAX_BH; h++) if(black_holes[h].active && black_holes[h].q1==players[i].state.q1 && black_holes[h].q2==players[i].state.q2 && black_holes[h].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.objects[obj_idx++] = (NetObject){(float)black_holes[h].x,(float)black_holes[h].y,(float)black_holes[h].z,0,0,6,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)black_holes[h].x,(float)black_holes[h].y,(float)black_holes[h].z,0,0,6,0,1, 0, h+3000};
             upd.object_count = obj_idx;
             
             upd.beam_count = players[i].state.beam_count;
@@ -407,13 +613,24 @@ void *game_loop(void *arg) {
             upd.dismantle = players[i].state.dismantle;
 
             send(players[i].socket, &upd, sizeof(PacketUpdate), 0);
+            
+            /* Reset One-Shot Events after sending */
+            if (players[i].state.beam_count > 0) players[i].state.beam_count = 0;
+            if (players[i].state.boom.active) players[i].state.boom.active = 0;
+            if (players[i].state.dismantle.active) players[i].state.dismantle.active = 0;
         }
     }
 }
 
 int main(int argc, char *argv[]) {
     int server_fd, new_socket; struct sockaddr_in addr; int opt=1, adlen=sizeof(addr); fd_set fds;
-    memset(players, 0, sizeof(players)); srand(time(NULL)); generate_galaxy();
+    memset(players, 0, sizeof(players)); srand(time(NULL)); 
+    
+    if (!load_galaxy()) {
+        generate_galaxy();
+        save_galaxy();
+    }
+    
     pthread_t tid; pthread_create(&tid, NULL, game_loop, NULL);
     server_fd = socket(AF_INET, SOCK_STREAM, 0); setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(DEFAULT_PORT);
@@ -433,13 +650,33 @@ int main(int argc, char *argv[]) {
             else {
                 int type = *(int*)buf;
                 if (type == PKT_LOGIN) {
-                    PacketLogin *pkt = (PacketLogin*)buf; strcpy(players[i].name, pkt->name); players[i].faction = pkt->faction; players[i].ship_class = pkt->ship_class;
-                    memset(&players[i].state, 0, sizeof(StarTrekGame)); players[i].state.energy = 3000; players[i].state.torpedoes = 10;
-                    players[i].state.q1 = rand()%10 + 1; players[i].state.q2 = rand()%10 + 1; players[i].state.q3 = rand()%10 + 1;
-                    players[i].state.s1 = 5.0; players[i].state.s2 = 5.0; players[i].state.s3 = 5.0;
-                    for(int s=0; s<8; s++) players[i].state.system_health[s] = 100.0f;
+                    PacketLogin *pkt = (PacketLogin*)buf; 
+                    
+                    /* Check if player already exists in persistence */
+                    int saved_idx = -1;
+                    for(int j=0; j<MAX_CLIENTS; j++) {
+                        if (strcmp(players[j].name, pkt->name) == 0) { saved_idx = j; break; }
+                    }
+                    
+                    if (saved_idx != -1 && saved_idx != i) {
+                        /* Migrate saved state to current slot i */
+                        int old_sock = players[i].socket;
+                        players[i] = players[saved_idx];
+                        players[i].socket = old_sock;
+                        players[i].active = 1;
+                        /* Clear the old slot to avoid duplicates */
+                        memset(&players[saved_idx], 0, sizeof(ConnectedPlayer));
+                        send_server_msg(i, "SERVER", "Welcome back, Captain. State restored.");
+                    } else {
+                        strcpy(players[i].name, pkt->name); players[i].faction = pkt->faction; players[i].ship_class = pkt->ship_class;
+                        memset(&players[i].state, 0, sizeof(StarTrekGame)); players[i].state.energy = 3000; players[i].state.torpedoes = 10;
+                        players[i].state.q1 = rand()%10 + 1; players[i].state.q2 = rand()%10 + 1; players[i].state.q3 = rand()%10 + 1;
+                        players[i].state.s1 = 5.0; players[i].state.s2 = 5.0; players[i].state.s3 = 5.0;
+                        for(int s=0; s<8; s++) players[i].state.system_health[s] = 100.0f;
+                        send_server_msg(i, "SERVER", "Welcome aboard, new Captain.");
+                    }
+                    
                     send(players[i].socket, &galaxy_master, sizeof(StarTrekGame), 0);
-                    send_server_msg(i, "SERVER", "Welcome aboard.");
                 } else if (type == PKT_COMMAND) {
                     char *cmd = ((PacketCommand*)buf)->cmd;
                     if (strncmp(cmd, "nav ", 4) == 0) {
@@ -462,6 +699,29 @@ int main(int argc, char *argv[]) {
                             players[i].nav_timer = 60; /* 2 secondi di allineamento */
                             send_server_msg(i, "HELMSMAN", "Course plotted. Aligning ship.");
                         }
+                    } else if (strncmp(cmd, "imp ", 4) == 0) {
+                        double h, m, s;
+                        if (sscanf(cmd, "imp %lf %lf %lf", &h, &m, &s) == 3) {
+                            if (s <= 0.0) {
+                                players[i].nav_state = NAV_STATE_IDLE;
+                                send_server_msg(i, "HELMSMAN", "Impulse engines All Stop.");
+                            } else {
+                                if (s > 1.0) s = 1.0;
+                                players[i].target_h = h; players[i].target_m = m;
+                                players[i].state.ent_h = h; players[i].state.ent_m = m; /* Instant Turn for manual control */
+                                
+                                double rad_h = h * M_PI / 180.0;
+                                double rad_m = m * M_PI / 180.0;
+                                players[i].dx = cos(rad_m) * sin(rad_h);
+                                players[i].dy = cos(rad_m) * -cos(rad_h);
+                                players[i].dz = sin(rad_m);
+                                
+                                players[i].warp_speed = s * 0.1; /* Max speed 0.1 units/tick */
+                                players[i].nav_state = NAV_STATE_IMPULSE;
+                                char msg[64]; sprintf(msg, "Impulse engines engaged at %.0f%%.", s*100.0);
+                                send_server_msg(i, "HELMSMAN", msg);
+                            }
+                        }
                     } else if (strcmp(cmd, "srs") == 0) {
                         char b[4096]; 
                         int q1 = players[i].state.q1, q2 = players[i].state.q2, q3 = players[i].state.q3;
@@ -481,7 +741,7 @@ int main(int argc, char *argv[]) {
                             double tx=players[j].state.s1, ty=players[j].state.s2, tz=players[j].state.s3;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s (Player)\n", "Vessel", j+1, tx, ty, tz, dist, h, m, players[j].name); 
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s (Player) [E:%d]\n", "Vessel", j+1, tx, ty, tz, dist, h, m, players[j].name, players[j].state.energy); 
                             strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* NPCs */
@@ -489,7 +749,7 @@ int main(int argc, char *argv[]) {
                             double tx=npcs[n].x, ty=npcs[n].y, tz=npcs[n].z;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s\n", "Vessel", n+100, tx, ty, tz, dist, h, m, get_species_name(npcs[n].faction)); 
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s [E:%d]\n", "Vessel", n+100, tx, ty, tz, dist, h, m, get_species_name(npcs[n].faction), npcs[n].energy); 
                             strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* Bases */
@@ -678,8 +938,33 @@ int main(int argc, char *argv[]) {
                             int hit = (int)((e_fire / d) * w_boost);
                             
                             if (tid >= 1 && tid <= 32 && players[tid-1].active) {
-                                for(int s=0;s<6;s++) players[tid-1].state.shields[s]-=hit/6;
-                                send_server_msg(tid-1, "BRIDGE", "Under phaser fire!");
+                                int damage_remaining = hit;
+                                for(int s=0;s<6;s++) {
+                                    if (damage_remaining <= 0) break;
+                                    int absorbed = (players[tid-1].state.shields[s] >= damage_remaining/6) ? damage_remaining/6 : players[tid-1].state.shields[s];
+                                    players[tid-1].state.shields[s] -= absorbed;
+                                    damage_remaining -= absorbed;
+                                }
+                                
+                                /* Shield Bleed-through */
+                                if (damage_remaining > 0) {
+                                    players[tid-1].state.energy -= damage_remaining;
+                                    send_server_msg(tid-1, "DAMAGE CONTROL", "Shields penetrated! Structural damage.");
+                                    if (rand()%100 > 80) {
+                                        int sys = rand()%8;
+                                        players[tid-1].state.system_health[sys] -= (damage_remaining / 100.0f);
+                                        if (players[tid-1].state.system_health[sys] < 0) players[tid-1].state.system_health[sys] = 0;
+                                    }
+                                    if (players[tid-1].state.energy <= 0) {
+                                        players[tid-1].state.energy = 0;
+                                        players[tid-1].active = 0;
+                                        players[tid-1].state.boom = (NetPoint){(float)players[tid-1].state.s1, (float)players[tid-1].state.s2, (float)players[tid-1].state.s3, 1};
+                                        send_server_msg(tid-1, "COMPUTER", "Critical failure. Ship destroyed.");
+                                        send_server_msg(i, "TACTICAL", "Target destroyed.");
+                                    }
+                                } else {
+                                    send_server_msg(tid-1, "BRIDGE", "Shields holding under phaser fire.");
+                                }
                             } else if (tid >= 100 && tid < 100+MAX_NPC && npcs[tid-100].active) {
                                 npcs[tid-100].energy -= hit; 
                                 if(npcs[tid-100].energy<=0) {
@@ -695,7 +980,7 @@ int main(int argc, char *argv[]) {
                                 }
                             }
                         }
-                    } else if (strncmp(cmd, "tor ", 4) == 0) {
+                    } else if (strncmp(cmd, "tor", 3) == 0 && (cmd[3] == '\0' || cmd[3] == ' ')) {
                         double h,m; bool manual = true;
                         if (players[i].state.lock_target > 0) {
                             int tid = players[i].state.lock_target; double tx, ty, tz;
@@ -790,7 +1075,15 @@ int main(int argc, char *argv[]) {
                     } else if (strcmp(cmd, "min") == 0) {
                         int f=0; for(int p=0;p<MAX_PLANETS;p++) if(planets[p].active && planets[p].q1==players[i].state.q1 && planets[p].q2==players[i].state.q2 && planets[p].q3==players[i].state.q3) {
                             double d=sqrt(pow(planets[p].x-players[i].state.s1,2)+pow(planets[p].y-players[i].state.s2,2)+pow(planets[p].z-players[i].state.s3,2));
-                            if(d<2.0){ int ex=(planets[p].amount>100)?100:planets[p].amount; planets[p].amount-=ex; players[i].state.inventory[planets[p].resource_type]+=ex; send_server_msg(i,"GEOLOGY","Mining successful."); f=1; break; }
+                            if(d<2.0){ 
+                                int ex=(planets[p].amount>100)?100:planets[p].amount; 
+                                planets[p].amount-=ex; 
+                                players[i].state.inventory[planets[p].resource_type]+=ex; 
+                                const char* res_names[]={"-","Dilithium","Tritanium","Verterium","Monotanium","Isolinear","Gases"};
+                                char b_msg[128];
+                                sprintf(b_msg, "Mining successful. Collected %d units of %s.", ex, res_names[planets[p].resource_type]);
+                                send_server_msg(i,"GEOLOGY",b_msg); f=1; break; 
+                            }
                         }
                         if(!f) send_server_msg(i,"COMPUTER","No planet in range.");
                     } else if (strncmp(cmd, "con ", 4) == 0) {
@@ -823,7 +1116,7 @@ int main(int argc, char *argv[]) {
                         if(near) {
                             players[i].state.energy += 500; if(players[i].state.energy > 5000) players[i].state.energy = 5000;
                             int s_idx = rand()%6; players[i].state.shields[s_idx] -= 100; if(players[i].state.shields[s_idx]<0) players[i].state.shields[s_idx]=0;
-                            send_server_msg(i, "ENGINEERING", "Solar scooping successful. Energy harvested, thermal stress on shields.");
+                            send_server_msg(i, "ENGINEERING", "Solar scooping successful. Collected 500 units of Energy.");
                         } else send_server_msg(i, "COMPUTER", "No star in range for solar scooping.");
                     } else if (strcmp(cmd, "har") == 0) {
                         bool near = false;
@@ -837,7 +1130,7 @@ int main(int argc, char *argv[]) {
                             players[i].state.energy += 1000; if(players[i].state.energy > 5000) players[i].state.energy = 5000;
                             players[i].state.inventory[1] += 50; /* Dilithium */
                             int s_idx = rand()%6; players[i].state.shields[s_idx] -= 300; if(players[i].state.shields[s_idx]<0) players[i].state.shields[s_idx]=0;
-                            send_server_msg(i, "ENGINEERING", "Antimatter harvest successful. Energy surge detected, high gravitational stress recorded.");
+                            send_server_msg(i, "ENGINEERING", "Antimatter harvest successful. Collected 1000 Energy and 50 Dilithium.");
                         } else send_server_msg(i, "COMPUTER", "No black hole in range.");
                     } else if (strcmp(cmd, "inv") == 0) {
                         char b[256]="Inv: "; char it[32]; const char* r[]={"-","Dil","Tri","Ver","Mon","Iso","Gas"};
@@ -925,8 +1218,8 @@ int main(int argc, char *argv[]) {
                                 double d = sqrt(pow(tx-players[i].state.s1,2)+pow(ty-players[i].state.s2,2)+pow(tz-players[i].state.s3,2));
                                 if (d < 1.0) {
                                     if (rand()%100 > 40) {
-                                        send_server_msg(i, "SECURITY", "Boarding successful! Enemy vessel captured.");
                                         players[i].state.energy += 1000; players[i].state.inventory[1] += 100;
+                                        send_server_msg(i, "SECURITY", "Boarding successful! Captured: 1000 Energy, 100 Dilithium.");
                                         if (tid >= 100 && tid < 100+MAX_NPC) {
                                             npcs[tid-100].active = 0;
                                             players[i].state.dismantle = (NetDismantle){npcs[tid-100].x, npcs[tid-100].y, npcs[tid-100].z, npcs[tid-100].faction, 1};
@@ -965,6 +1258,23 @@ int main(int argc, char *argv[]) {
                             players[j].state.dismantle = (NetDismantle){(float)players[i].state.s1, (float)players[i].state.s2, (float)players[i].state.s3, 1, 1};
                         }
                         players[i].active = 0; close(players[i].socket);
+                    } else if (strcmp(cmd, "who") == 0) {
+                        char b[4096] = "\033[1;37m\n--- ACTIVE CAPTAINS IN GALAXY ---\033[0m\n";
+                        strncat(b, "ID  NAME             FACTION      CLASS           LOCATION      STATUS\n", sizeof(b)-strlen(b)-1);
+                        for(int j=0; j<MAX_CLIENTS; j++) if(players[j].active) {
+                            const char* f_names[] = {"Federation", "Klingon", "Romulan", "Borg", "Cardassian"};
+                            const char* c_names[] = {"Constitution", "Miranda", "Excelsior", "Constellation", "Defiant", "Galaxy", "Sovereign", "Intrepid", "Akira", "Nebula", "Ambassador", "Oberth", "Steamrunner", "Generic Alien"};
+                            char line[256];
+                            snprintf(line, sizeof(line), "%-3d %-16s %-12s %-15s [%d,%d,%d]  %s\n", 
+                                j+1, players[j].name, 
+                                (players[j].faction >= 0 && players[j].faction < 5) ? f_names[players[j].faction] : "Unknown",
+                                (players[j].ship_class >= 0 && players[j].ship_class <= 13) ? c_names[players[j].ship_class] : "Unknown",
+                                players[j].state.q1, players[j].state.q2, players[j].state.q3,
+                                players[j].state.is_cloaked ? "\033[1;35mCLOAKED\033[0m" : "\033[1;32mONLINE\033[0m");
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
+                        }
+                        strncat(b, "----------------------------------------------------------------------\n", sizeof(b)-strlen(b)-1);
+                        send_server_msg(i, "COMPUTER", b);
                     } else if (strncmp(cmd, "cal ", 4) == 0) {
                         int qx,qy,qz; if(sscanf(cmd,"cal %d %d %d",&qx,&qy,&qz)==3) {
                             double dx=(qx-players[i].state.q1)*10.0, dy=(qy-players[i].state.q2)*10.0, dz=(qz-players[i].state.q3)*10.0;
