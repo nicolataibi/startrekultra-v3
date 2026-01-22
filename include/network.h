@@ -10,6 +10,10 @@
 #define PKT_UPDATE 3
 #define PKT_MESSAGE 4
 
+#define SCOPE_GLOBAL 0
+#define SCOPE_FACTION 1
+#define SCOPE_PRIVATE 2
+
 typedef enum {
     FACTION_FEDERATION = 0,
     FACTION_KLINGON,
@@ -51,14 +55,30 @@ typedef struct {
     int type;
     char from[64];
     int faction;
-    int scope; /* 0: Global, 1: Faction */
-    char text[2048];
+    int scope; /* 0: Global, 1: Faction, 2: Private */
+    int target_id; /* Player ID (1-based) for Private Message */
+    char text[4096];
 } PacketMessage;
 
 /* Update Packet: Inviato dal server ai client per aggiornare la Tactical View */
 typedef struct {
     int type;
-    StarTrekGame local_view; /* Versione ridotta o specifica per il quadrante */
+    long long frame_id;
+    int q1, q2, q3;
+    double s1, s2, s3;
+    double ent_h, ent_m;
+    int energy;
+    int torpedoes;
+    int shields[6];
+    int lock_target;
+    bool is_cloaked;
+    int object_count;
+    NetObject objects[MAX_NET_OBJECTS];
+    int beam_count;
+    NetBeam beams[MAX_NET_BEAMS];
+    NetPoint torp;
+    NetPoint boom;
+    NetDismantle dismantle;
 } PacketUpdate;
 
 #endif

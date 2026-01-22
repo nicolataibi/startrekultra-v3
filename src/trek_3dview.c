@@ -27,7 +27,7 @@ volatile int g_is_loading = 0;
 float angleY = 0.0f;
 float angleX = 20.0f;
 float zoom = -14.0f;
-float autoRotate = 0.15f;
+float autoRotate = 0.075f;
 float pulse = 0.0f;
 
 int g_energy = 0, g_shields = 0, g_klingons = 0;
@@ -39,12 +39,15 @@ char g_last_quadrant[128] = "";
 #define MAX_TRAIL 40
 typedef struct {
     float x, y, z;
+    float tx, ty, tz; /* Interpolation targets */
     float h, m;
+    float th, tm;     /* Target heading and mark */
     int type;
     int ship_class;
     float trail[MAX_TRAIL][3];
     int trail_ptr;
     int trail_count;
+    double last_update_time;
 } GameObject;
 
 typedef struct {
@@ -175,11 +178,27 @@ void loadGameState() {
     g_show_grid = g_shared_state->shm_show_grid;
     objectCount = g_shared_state->object_count;
     for(int i=0; i<objectCount; i++) {
-        objects[i].x = g_shared_state->objects[i].shm_x - 5.5f;
-        objects[i].y = g_shared_state->objects[i].shm_z - 5.5f;
-        objects[i].z = 5.5f - g_shared_state->objects[i].shm_y;
-        objects[i].h = g_shared_state->objects[i].h;
-        objects[i].m = g_shared_state->objects[i].m;
+        float next_x = g_shared_state->objects[i].shm_x - 5.5f;
+        float next_y = g_shared_state->objects[i].shm_z - 5.5f;
+        float next_z = 5.5f - g_shared_state->objects[i].shm_y;
+        
+        /* Se è la prima volta che vediamo l'oggetto o se ha fatto un salto enorme (cambio quadrante) */
+        float dx = next_x - objects[i].x;
+        float dy = next_y - objects[i].y;
+        float dz = next_z - objects[i].z;
+        if (objects[i].x < -50.0f || (dx*dx + dy*dy + dz*dz) > 25.0f) {
+            objects[i].x = objects[i].tx = next_x;
+            objects[i].y = objects[i].ty = next_y;
+            objects[i].z = objects[i].tz = next_z;
+        } else {
+            objects[i].tx = next_x;
+            objects[i].ty = next_y;
+            objects[i].tz = next_z;
+        }
+
+        objects[i].th = g_shared_state->objects[i].h;
+        objects[i].tm = g_shared_state->objects[i].m;
+        objects[i].last_update_time = glutGet(GLUT_ELAPSED_TIME);
         objects[i].type = g_shared_state->objects[i].type;
         objects[i].ship_class = g_shared_state->objects[i].ship_class; 
         if (i == 0) { enterpriseX = objects[i].x; enterpriseY = objects[i].y; enterpriseZ = objects[i].z; }
@@ -661,7 +680,7 @@ void display() {
 }
 
 void timer(int v) { 
-    angleY += autoRotate; pulse += 0.1; 
+    angleY += autoRotate; pulse += 0.05; 
     
     /* Fade out beams */
     for (int i = 0; i < 10; i++) if (beams[i].alpha > 0) beams[i].alpha -= 0.05f;
@@ -678,8 +697,26 @@ void timer(int v) {
         }
     }
 
-    /* Update Trails for all ships */
+    /* Update Objects with Interpolation */
     for (int i = 0; i < objectCount; i++) {
+        /* Interpolazione fluida per la posizione (LERP) */
+        float interp_speed = 0.12f;
+        objects[i].x += (objects[i].tx - objects[i].x) * interp_speed;
+        objects[i].y += (objects[i].ty - objects[i].y) * interp_speed;
+        objects[i].z += (objects[i].tz - objects[i].z) * interp_speed;
+        
+        /* Interpolazione fluida per l'orientamento (Heading/Mark) */
+        float dh = objects[i].th - objects[i].h;
+        if (dh > 180.0f) dh -= 360.0f;
+        if (dh < -180.0f) dh += 360.0f;
+        objects[i].h += dh * 0.08f;
+        if (objects[i].h >= 360.0f) objects[i].h -= 360.0f;
+        if (objects[i].h < 0.0f) objects[i].h += 360.0f;
+
+        objects[i].m += (objects[i].tm - objects[i].m) * 0.08f;
+        
+        if (i == 0) { enterpriseX = objects[i].x; enterpriseY = objects[i].y; enterpriseZ = objects[i].z; }
+
         if (objects[i].type == 1 || objects[i].type >= 10) {
             float lastX = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][0];
             float lastY = objects[i].trail[(objects[i].trail_ptr - 1 + MAX_TRAIL) % MAX_TRAIL][1];
@@ -695,15 +732,20 @@ void timer(int v) {
                 objects[i].trail_ptr = 0;
             }
 
-            objects[i].trail[objects[i].trail_ptr][0] = objects[i].x;
-            objects[i].trail[objects[i].trail_ptr][1] = objects[i].y;
-            objects[i].trail[objects[i].trail_ptr][2] = objects[i].z;
-            objects[i].trail_ptr = (objects[i].trail_ptr + 1) % MAX_TRAIL;
-            if (objects[i].trail_count < MAX_TRAIL) objects[i].trail_count++;
+            static int trail_tick = 0;
+            if (trail_tick % 2 == 0) { /* Riduciamo la densità della scia per fluidità visiva */
+                objects[i].trail[objects[i].trail_ptr][0] = objects[i].x;
+                objects[i].trail[objects[i].trail_ptr][1] = objects[i].y;
+                objects[i].trail[objects[i].trail_ptr][2] = objects[i].z;
+                objects[i].trail_ptr = (objects[i].trail_ptr + 1) % MAX_TRAIL;
+                if (objects[i].trail_count < MAX_TRAIL) objects[i].trail_count++;
+            }
         }
     }
+    static int global_trail_tick = 0;
+    global_trail_tick++;
 
-    glutPostRedisplay(); glutTimerFunc(33, timer, 0); 
+    glutPostRedisplay(); glutTimerFunc(16, timer, 0); 
 }
 void keyboard(unsigned char k, int x, int y) { 
     if(k==27) exit(0); 
@@ -723,6 +765,6 @@ int main(int argc, char** argv) {
     glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     GLfloat lp[] = {10, 10, 10, 1}; glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glLightfv(GL_LIGHT0, GL_POSITION, lp);
     initStars(); initVBOs(); glMatrixMode(GL_PROJECTION); gluPerspective(45, 1.33, 1, 500); glMatrixMode(GL_MODELVIEW);
-    glutDisplayFunc(display); glutKeyboardFunc(keyboard); glutSpecialFunc(special); glutTimerFunc(33, timer, 0);
+    glutDisplayFunc(display); glutKeyboardFunc(keyboard); glutSpecialFunc(special); glutTimerFunc(16, timer, 0);
     kill(getppid(), SIGUSR2); glutMainLoop(); return 0;
 }

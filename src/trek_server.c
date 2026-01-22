@@ -114,39 +114,52 @@ void generate_galaxy() {
 
 void broadcast_message(PacketMessage *msg) {
     for (int i = 0; i < MAX_CLIENTS; i++) if (players[i].active) {
-        if (msg->scope == 1 && players[i].faction != msg->faction) continue;
+        if (msg->scope == SCOPE_FACTION && players[i].faction != msg->faction) continue;
+        if (msg->scope == SCOPE_PRIVATE) {
+            /* Send to target (ID matches) or sender (echo) */
+            /* msg->target_id is 1-based Player ID. players index is 0-based. */
+            bool is_target = ((i + 1) == msg->target_id);
+            bool is_sender = (strcmp(players[i].name, msg->from) == 0);
+            if (!is_target && !is_sender) continue;
+        }
         send(players[i].socket, msg, sizeof(PacketMessage), 0);
     }
 }
 
 void send_server_msg(int p_idx, const char *from, const char *text) {
-    PacketMessage msg = {PKT_MESSAGE, "", 0, 0, ""};
-    strncpy(msg.from, from, 63); strncpy(msg.text, text, 2047);
+    PacketMessage msg = {PKT_MESSAGE, "", 0, 0, 0, ""};
+    strncpy(msg.from, from, 63); strncpy(msg.text, text, 4095);
     send(players[p_idx].socket, &msg, sizeof(PacketMessage), 0);
 }
 
 void *game_loop(void *arg) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
     while (1) {
-        usleep(50000); 
+        /* 30 FPS Update (approx 33.3ms) */
+        ts.tv_nsec += 33333333;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (!players[i].active) continue;
 
             /* Unified Navigation State Machine */
             if (players[i].nav_state == NAV_STATE_ALIGN) {
                 players[i].nav_timer--;
-                /* Interpolazione rotazione (2 secondi = 40 frame a 20 FPS) */
-                double t = 1.0 - (double)players[i].nav_timer / 40.0;
+                /* Interpolazione rotazione (2 secondi = 60 frame a 30 FPS) */
+                double t = 1.0 - (double)players[i].nav_timer / 60.0;
                 players[i].state.ent_h = players[i].start_h + (players[i].target_h - players[i].start_h) * t;
                 players[i].state.ent_m = players[i].start_m + (players[i].target_m - players[i].start_m) * t;
                 
                 if (players[i].nav_timer <= 0) {
                     players[i].nav_state = NAV_STATE_WARP;
-                    /* Il timer del warp dipende dalla distanza (3s per quadrante = 60 frame per 10 unità) */
+                    /* Il timer del warp dipende dalla distanza (3s per quadrante = 90 frame per 10 unità) */
                     double dist = sqrt(pow(players[i].target_gx - ((players[i].state.q1-1)*10+players[i].state.s1), 2) + 
                                        pow(players[i].target_gy - ((players[i].state.q2-1)*10+players[i].state.s2), 2) + 
                                        pow(players[i].target_gz - ((players[i].state.q3-1)*10+players[i].state.s3), 2));
-                    players[i].nav_timer = (int)(dist / 10.0 * 60.0);
-                    if (players[i].nav_timer < 20) players[i].nav_timer = 20; /* Minimo 1 secondo */
+                    players[i].nav_timer = (int)(dist / 10.0 * 90.0);
+                    if (players[i].nav_timer < 30) players[i].nav_timer = 30; /* Minimo 1 secondo */
                     players[i].warp_speed = dist / players[i].nav_timer;
                     send_server_msg(i, "HELMSMAN", "Entering Warp drive.");
                 }
@@ -157,28 +170,61 @@ void *game_loop(void *arg) {
                 double cur_gy = (players[i].state.q2 - 1) * 10.0 + players[i].state.s2;
                 double cur_gz = (players[i].state.q3 - 1) * 10.0 + players[i].state.s3;
 
-                cur_gx += players[i].dx * players[i].warp_speed;
-                cur_gy += players[i].dy * players[i].warp_speed;
-                cur_gz += players[i].dz * players[i].warp_speed;
+                /* Warp Safety Interlock: Proactive collision detection */
+                bool emergency_stop = false;
+                
+                /* Check for Black Holes in current quadrant */
+                for(int h=0; h<MAX_BH; h++) if(black_holes[h].active && black_holes[h].q1==players[i].state.q1 && black_holes[h].q2==players[i].state.q2 && black_holes[h].q3==players[i].state.q3) {
+                    double dx = black_holes[h].x - players[i].state.s1;
+                    double dy = black_holes[h].y - players[i].state.s2;
+                    double dz = black_holes[h].z - players[i].state.s3;
+                    if((dx*dx + dy*dy + dz*dz) < 2.25) { /* 1.5 units safety margin */
+                        send_server_msg(i, "COMPUTER", "EMERGENCY: Gravitational shear detected. Dropping out of Warp.");
+                        emergency_stop = true; break;
+                    }
+                }
+                /* Check for Stars in current quadrant */
+                if (!emergency_stop) {
+                    for(int s=0; s<MAX_STARS; s++) if(stars_data[s].active && stars_data[s].q1==players[i].state.q1 && stars_data[s].q2==players[i].state.q2 && stars_data[s].q3==players[i].state.q3) {
+                        double dx = stars_data[s].x - players[i].state.s1;
+                        double dy = stars_data[s].y - players[i].state.s2;
+                        double dz = stars_data[s].z - players[i].state.s3;
+                        if((dx*dx + dy*dy + dz*dz) < 1.44) { /* 1.2 units safety margin */
+                            send_server_msg(i, "COMPUTER", "EMERGENCY: Solar proximity warning. Warp drive disengaged.");
+                            emergency_stop = true; break;
+                        }
+                    }
+                }
 
-                players[i].state.q1 = (int)(cur_gx / 10.0) + 1;
-                players[i].state.q2 = (int)(cur_gy / 10.0) + 1;
-                players[i].state.q3 = (int)(cur_gz / 10.0) + 1;
-                players[i].state.s1 = fmod(cur_gx, 10.0);
-                players[i].state.s2 = fmod(cur_gy, 10.0);
-                players[i].state.s3 = fmod(cur_gz, 10.0);
-
-                if (players[i].nav_timer <= 0) {
+                if (emergency_stop) {
                     players[i].nav_state = NAV_STATE_REALIGN;
-                    players[i].nav_timer = 40; /* 2 secondi per tornare a mark 0 */
+                    players[i].nav_timer = 30; /* Faster recovery (1s) */
                     players[i].start_h = players[i].state.ent_h;
                     players[i].start_m = players[i].state.ent_m;
-                    send_server_msg(i, "HELMSMAN", "Exiting Warp. Realigning ship.");
+                } else {
+                    cur_gx += players[i].dx * players[i].warp_speed;
+                    cur_gy += players[i].dy * players[i].warp_speed;
+                    cur_gz += players[i].dz * players[i].warp_speed;
+
+                    players[i].state.q1 = (int)(cur_gx / 10.0) + 1;
+                    players[i].state.q2 = (int)(cur_gy / 10.0) + 1;
+                    players[i].state.q3 = (int)(cur_gz / 10.0) + 1;
+                    players[i].state.s1 = fmod(cur_gx, 10.0);
+                    players[i].state.s2 = fmod(cur_gy, 10.0);
+                    players[i].state.s3 = fmod(cur_gz, 10.0);
+
+                    if (players[i].nav_timer <= 0) {
+                        players[i].nav_state = NAV_STATE_REALIGN;
+                        players[i].nav_timer = 60; /* 2 secondi per tornare a mark 0 */
+                        players[i].start_h = players[i].state.ent_h;
+                        players[i].start_m = players[i].state.ent_m;
+                        send_server_msg(i, "HELMSMAN", "Exiting Warp. Realigning ship.");
+                    }
                 }
             }
             else if (players[i].nav_state == NAV_STATE_REALIGN) {
                 players[i].nav_timer--;
-                double t = 1.0 - (double)players[i].nav_timer / 40.0;
+                double t = 1.0 - (double)players[i].nav_timer / 60.0;
                 /* Torniamo a Mark 0, Heading rimane invariato */
                 players[i].state.ent_m = players[i].start_m * (1.0 - t);
                 
@@ -209,8 +255,8 @@ void *game_loop(void *arg) {
             if (players[i].state.boom.active) players[i].state.boom.active = 0;
             if (players[i].state.dismantle.active) players[i].state.dismantle.active = 0;
             
-            static int regen_tick = 0;
-            if (regen_tick % 40 == 0) {
+            static int global_tick = 0;
+            if (global_tick % 60 == 0) {
                 /* Effetti Power Distribution: 0:Engines, 1:Shields, 2:Weapons */
                 float p_shields = players[i].state.power_dist[1];
 
@@ -229,27 +275,33 @@ void *game_loop(void *arg) {
                     }
                 }
 
-                /* Controllo vittoria globale */
-                int current_k9 = 0;
-                for(int n=0; n<MAX_NPC; n++) if(npcs[n].active) current_k9++;
-                galaxy_master.k9 = current_k9;
-                
-                if (galaxy_master.k9 == 0) {
-                    PacketMessage win_msg = {PKT_MESSAGE, "STARFLEET", 0, 0, "\033[1;32mMISSION COMPLETE: All hostile entities neutralized. The galaxy is safe.\033[0m"};
-                    broadcast_message(&win_msg);
+                /* Controllo vittoria globale (Eseguito solo una volta per tick globale) */
+                if (i == 0) {
+                    int current_k9 = 0;
+                    for(int n=0; n<MAX_NPC; n++) if(npcs[n].active) current_k9++;
+                    galaxy_master.k9 = current_k9;
+                    
+                    if (galaxy_master.k9 == 0) {
+                        PacketMessage win_msg = {PKT_MESSAGE, "STARFLEET", 0, 0, 0, "\033[1;32mMISSION COMPLETE: All hostile entities neutralized. The galaxy is safe.\033[0m"};
+                        broadcast_message(&win_msg);
+                    }
                 }
 
                 for(int s=0; s<8; s++) if(players[i].state.system_health[s]<100) players[i].state.system_health[s]+=0.1;
             }
-            regen_tick++;
+            if (i == MAX_CLIENTS - 1) global_tick++;
+
             if (players[i].torp_active) {
                 players[i].tx += players[i].tdx * 0.8; players[i].ty += players[i].tdy * 0.8; players[i].tz += players[i].tdz * 0.8;
                 players[i].state.torp = (NetPoint){(float)players[i].tx, (float)players[i].ty, (float)players[i].tz, 1};
                 
-                /* Collisione con altri giocatori */
+                /* Collisione con altri giocatori (Ottimizzata) */
                 for (int k=0; k<MAX_CLIENTS; k++) if (k != i && players[k].active && players[k].state.q1 == players[i].state.q1 && players[k].state.q2 == players[i].state.q2 && players[k].state.q3 == players[i].state.q3) {
-                    double d = sqrt(pow(players[k].state.s1-players[i].tx,2)+pow(players[k].state.s2-players[i].ty,2)+pow(players[k].state.s3-players[i].tz,2));
-                    if (d < 0.5) {
+                    double dx = players[k].state.s1-players[i].tx;
+                    double dy = players[k].state.s2-players[i].ty;
+                    double dz = players[k].state.s3-players[i].tz;
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < 0.25) {
                         players[i].torp_active = false; players[i].state.torp.active = 0;
                         /* Danno agli scudi e travaso su energia/sistemi */
                         int dmg = 500 + rand()%500;
@@ -269,10 +321,13 @@ void *game_loop(void *arg) {
                         send_server_msg(k, "BRIDGE", "Hull breach! Torpedo impact.");
                     }
                 }
-                /* Collisione con NPC */
+                /* Collisione con NPC (Ottimizzata) */
                 for (int n=0; n<MAX_NPC; n++) if (npcs[n].active && npcs[n].q1 == players[i].state.q1 && npcs[n].q2 == players[i].state.q2 && npcs[n].q3 == players[i].state.q3) {
-                    double d = sqrt(pow(npcs[n].x-players[i].tx,2)+pow(npcs[n].y-players[i].ty,2)+pow(npcs[n].z-players[i].tz,2));
-                    if (d < 0.6) {
+                    double dx = npcs[n].x-players[i].tx;
+                    double dy = npcs[n].y-players[i].ty;
+                    double dz = npcs[n].z-players[i].tz;
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < 0.36) {
                         players[i].torp_active = false; players[i].state.torp.active = 0;
                         players[i].state.boom = (NetPoint){(float)npcs[n].x, (float)npcs[n].y, (float)npcs[n].z, 1};
                         npcs[n].energy -= 800;
@@ -294,40 +349,63 @@ void *game_loop(void *arg) {
                 if (players[i].tx<0||players[i].tx>10||players[i].ty<0||players[i].ty>10||players[i].tz<0||players[i].tz>10) { players[i].torp_active = false; players[i].state.torp.active = 0; }
             }
 
-            /* NPC AI: Reazione dei nemici */
+            /* NPC AI: Reazione dei nemici (Ottimizzata) */
             static int ai_tick = 0;
-            if (ai_tick % 20 == 0) {
+            if (ai_tick % 30 == 0) {
                 for (int n=0; n<MAX_NPC; n++) if (npcs[n].active && npcs[n].q1 == players[i].state.q1 && npcs[n].q2 == players[i].state.q2 && npcs[n].q3 == players[i].state.q3) {
-                    double d = sqrt(pow(npcs[n].x-players[i].state.s1,2)+pow(npcs[n].y-players[i].state.s2,2)+pow(npcs[n].z-players[i].state.s3,2));
-                    if (d < 5.0 && !players[i].state.is_cloaked) {
+                    double dx = npcs[n].x-players[i].state.s1;
+                    double dy = npcs[n].y-players[i].state.s2;
+                    double dz = npcs[n].z-players[i].state.s3;
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < 25.0 && !players[i].state.is_cloaked) {
                         /* Il nemico spara! */
                         players[i].state.beam_count = 1;
                         players[i].state.beams[0] = (NetBeam){(float)npcs[n].x, (float)npcs[n].y, (float)npcs[n].z, 1};
-                        int dmg = (int)(200.0 / d);
+                        int dmg = (int)(200.0 / sqrt(d2));
                         for(int s=0; s<6; s++) players[i].state.shields[s] -= dmg/6;
                         send_server_msg(i, "WARNING", "Incoming phaser fire!");
                     }
                 }
             }
-            ai_tick++;
-            PacketUpdate upd; upd.type = PKT_UPDATE; memcpy(&upd.local_view, &players[i].state, sizeof(StarTrekGame));
-            upd.local_view.frame_id = (long long)time(NULL) + i;
+            if (i == MAX_CLIENTS - 1) ai_tick++;
+
+            PacketUpdate upd; 
+            memset(&upd, 0, sizeof(PacketUpdate));
+            upd.type = PKT_UPDATE;
+            static long long local_frame_counter = 0;
+            upd.frame_id = local_frame_counter++;
+            upd.q1 = players[i].state.q1; upd.q2 = players[i].state.q2; upd.q3 = players[i].state.q3;
+            upd.s1 = players[i].state.s1; upd.s2 = players[i].state.s2; upd.s3 = players[i].state.s3;
+            upd.ent_h = players[i].state.ent_h; upd.ent_m = players[i].state.ent_m;
+            upd.energy = players[i].state.energy;
+            upd.torpedoes = players[i].state.torpedoes;
+            for(int s=0; s<6; s++) upd.shields[s] = players[i].state.shields[s];
+            upd.lock_target = players[i].state.lock_target;
+            upd.is_cloaked = players[i].state.is_cloaked;
+            
             int obj_idx = 0;
-            upd.local_view.objects[obj_idx++] = (NetObject){(float)players[i].state.s1,(float)players[i].state.s2,(float)players[i].state.s3,(float)players[i].state.ent_h,(float)players[i].state.ent_m,1,players[i].ship_class,1};
+            upd.objects[obj_idx++] = (NetObject){(float)players[i].state.s1,(float)players[i].state.s2,(float)players[i].state.s3,(float)players[i].state.ent_h,(float)players[i].state.ent_m,1,players[i].ship_class,1};
             for(int j=0; j<MAX_CLIENTS; j++) if (i!=j && players[j].active && players[j].state.q1==players[i].state.q1 && players[j].state.q2==players[i].state.q2 && players[j].state.q3==players[i].state.q3 && !players[j].state.is_cloaked && obj_idx < MAX_NET_OBJECTS) {
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)players[j].state.s1,(float)players[j].state.s2,(float)players[j].state.s3,(float)players[j].state.ent_h,(float)players[j].state.ent_m,1,players[j].ship_class,1};
+                upd.objects[obj_idx++] = (NetObject){(float)players[j].state.s1,(float)players[j].state.s2,(float)players[j].state.s3,(float)players[j].state.ent_h,(float)players[j].state.ent_m,1,players[j].ship_class,1};
             }
             for(int n=0; n<MAX_NPC; n++) if(npcs[n].active && npcs[n].q1==players[i].state.q1 && npcs[n].q2==players[i].state.q2 && npcs[n].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)npcs[n].x,(float)npcs[n].y,(float)npcs[n].z,0,0,npcs[n].faction,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)npcs[n].x,(float)npcs[n].y,(float)npcs[n].z,0,0,npcs[n].faction,0,1};
             for(int b=0; b<MAX_BASES; b++) if(bases[b].active && bases[b].q1==players[i].state.q1 && bases[b].q2==players[i].state.q2 && bases[b].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)bases[b].x,(float)bases[b].y,(float)bases[b].z,0,0,3,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)bases[b].x,(float)bases[b].y,(float)bases[b].z,0,0,3,0,1};
             for(int p=0; p<MAX_PLANETS; p++) if(planets[p].active && planets[p].q1==players[i].state.q1 && planets[p].q2==players[i].state.q2 && planets[p].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)planets[p].x,(float)planets[p].y,(float)planets[p].z,0,0,5,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)planets[p].x,(float)planets[p].y,(float)planets[p].z,0,0,5,0,1};
             for(int s=0; s<MAX_STARS; s++) if(stars_data[s].active && stars_data[s].q1==players[i].state.q1 && stars_data[s].q2==players[i].state.q2 && stars_data[s].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)stars_data[s].x,(float)stars_data[s].y,(float)stars_data[s].z,0,0,4,0,1};
+                upd.objects[obj_idx++] = (NetObject){(float)stars_data[s].x,(float)stars_data[s].y,(float)stars_data[s].z,0,0,4,0,1};
             for(int h=0; h<MAX_BH; h++) if(black_holes[h].active && black_holes[h].q1==players[i].state.q1 && black_holes[h].q2==players[i].state.q2 && black_holes[h].q3==players[i].state.q3 && obj_idx < MAX_NET_OBJECTS)
-                upd.local_view.objects[obj_idx++] = (NetObject){(float)black_holes[h].x,(float)black_holes[h].y,(float)black_holes[h].z,0,0,6,0,1};
-            upd.local_view.object_count = obj_idx;
+                upd.objects[obj_idx++] = (NetObject){(float)black_holes[h].x,(float)black_holes[h].y,(float)black_holes[h].z,0,0,6,0,1};
+            upd.object_count = obj_idx;
+            
+            upd.beam_count = players[i].state.beam_count;
+            for(int b=0; b<upd.beam_count && b<MAX_NET_BEAMS; b++) upd.beams[b] = players[i].state.beams[b];
+            upd.torp = players[i].state.torp;
+            upd.boom = players[i].state.boom;
+            upd.dismantle = players[i].state.dismantle;
+
             send(players[i].socket, &upd, sizeof(PacketUpdate), 0);
         }
     }
@@ -381,43 +459,46 @@ int main(int argc, char *argv[]) {
                             players[i].target_gz = (players[i].state.q3-1)*10.0+players[i].state.s3+players[i].dz*w*10.0;
                             
                             players[i].nav_state = NAV_STATE_ALIGN;
-                            players[i].nav_timer = 40; /* 2 secondi di allineamento */
+                            players[i].nav_timer = 60; /* 2 secondi di allineamento */
                             send_server_msg(i, "HELMSMAN", "Course plotted. Aligning ship.");
                         }
                     } else if (strcmp(cmd, "srs") == 0) {
-                        char b[2048]; 
+                        char b[4096]; 
                         int q1 = players[i].state.q1, q2 = players[i].state.q2, q3 = players[i].state.q3;
                         double s1 = players[i].state.s1, s2 = players[i].state.s2, s3 = players[i].state.s3;
                         
-                        sprintf(b, "\033[1;36m\n--- SHORT RANGE SENSOR ANALYSIS ---\033[0m\n");
-                        sprintf(b+strlen(b), "QUADRANT: [%d,%d,%d] | SECTOR: [%.1f,%.1f,%.1f]\n", q1, q2, q3, s1, s2, s3);
-                        sprintf(b+strlen(b), "ENERGY: %d | TORPEDOES: %d | STATUS: %s\n", 
+                        snprintf(b, sizeof(b), "\033[1;36m\n--- SHORT RANGE SENSOR ANALYSIS ---\033[0m\n");
+                        snprintf(b+strlen(b), sizeof(b)-strlen(b), "QUADRANT: [%d,%d,%d] | SECTOR: [%.1f,%.1f,%.1f]\n", q1, q2, q3, s1, s2, s3);
+                        snprintf(b+strlen(b), sizeof(b)-strlen(b), "ENERGY: %d | TORPEDOES: %d | STATUS: %s\n", 
                                 players[i].state.energy, players[i].state.torpedoes, players[i].state.is_cloaked ? "\033[1;35mCLOAKED\033[0m" : "\033[1;32mNORMAL\033[0m");
-                        sprintf(b+strlen(b), "\033[1;37mDEFLECTORS:  F:%-4d R:%-4d T:%-4d B:%-4d L:%-4d RI:%-4d\033[0m\n",
+                        snprintf(b+strlen(b), sizeof(b)-strlen(b), "\033[1;37mDEFLECTORS:  F:%-4d R:%-4d T:%-4d B:%-4d L:%-4d RI:%-4d\033[0m\n",
                                 players[i].state.shields[0], players[i].state.shields[1], players[i].state.shields[2],
                                 players[i].state.shields[3], players[i].state.shields[4], players[i].state.shields[5]);
-                        strcat(b, "\n\033[1;37mTYPE       ID    POSITION      DIST   H / M         DETAILS\033[0m\n");
+                        strncat(b, "\n\033[1;37mTYPE       ID    POSITION      DIST   H / M         DETAILS\033[0m\n", sizeof(b)-strlen(b)-1);
 
                         /* Players */
                         for(int j=0; j<MAX_CLIENTS; j++) if(players[j].active && i!=j && players[j].state.q1 == q1 && players[j].state.q2 == q2 && players[j].state.q3 == q3 && !players[j].state.is_cloaked) {
                             double tx=players[j].state.s1, ty=players[j].state.s2, tz=players[j].state.s3;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s (Player)\n", "Vessel", j+1, tx, ty, tz, dist, h, m, players[j].name); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s (Player)\n", "Vessel", j+1, tx, ty, tz, dist, h, m, players[j].name); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* NPCs */
                         for(int n=0; n<MAX_NPC; n++) if(npcs[n].active && npcs[n].q1 == q1 && npcs[n].q2 == q2 && npcs[n].q3 == q3) {
                             double tx=npcs[n].x, ty=npcs[n].y, tz=npcs[n].z;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s\n", "Vessel", n+100, tx, ty, tz, dist, h, m, get_species_name(npcs[n].faction)); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     %s\n", "Vessel", n+100, tx, ty, tz, dist, h, m, get_species_name(npcs[n].faction)); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* Bases */
                         for(int bs=0; bs<MAX_BASES; bs++) if(bases[bs].active && bases[bs].q1 == q1 && bases[bs].q2 == q2 && bases[bs].q3 == q3) {
                             double tx=bases[bs].x, ty=bases[bs].y, tz=bases[bs].z;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Federation Outpost\n", "Starbase", bs+500, tx, ty, tz, dist, h, m); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Federation Outpost\n", "Starbase", bs+500, tx, ty, tz, dist, h, m); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* Planets */
                         for(int p=0; p<MAX_PLANETS; p++) if(planets[p].active && planets[p].q1 == q1 && planets[p].q2 == q2 && planets[p].q3 == q3) {
@@ -425,23 +506,26 @@ int main(int argc, char *argv[]) {
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
                             const char* res[]={"-","Dilithium","Tritanium","Verterium","Monotanium","Isolinear","Gases"};
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Class-M (Res: %s)\n", "Planet", p+1000, tx, ty, tz, dist, h, m, res[planets[p].resource_type]); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Class-M (Res: %s)\n", "Planet", p+1000, tx, ty, tz, dist, h, m, res[planets[p].resource_type]); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* Stars */
                         for(int s=0; s<MAX_STARS; s++) if(stars_data[s].active && stars_data[s].q1 == q1 && stars_data[s].q2 == q2 && stars_data[s].q3 == q3) {
                             double tx=stars_data[s].x, ty=stars_data[s].y, tz=stars_data[s].z;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double h=atan2(dx,-dy)*180/M_PI; if(h<0) h+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Type-G Main Sequence\n", "Star", s+2000, tx, ty, tz, dist, h, m); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     Type-G Main Sequence\n", "Star", s+2000, tx, ty, tz, dist, h, m); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
                         /* Black Holes */
                         for(int h=0; h<MAX_BH; h++) if(black_holes[h].active && black_holes[h].q1 == q1 && black_holes[h].q2 == q2 && black_holes[h].q3 == q3) {
                             double tx=black_holes[h].x, ty=black_holes[h].y, tz=black_holes[h].z;
                             double dx=tx-s1, dy=ty-s2, dz=tz-s3; double dist=sqrt(dx*dx+dy*dy+dz*dz);
                             double hh=atan2(dx,-dy)*180/M_PI; if(hh<0) hh+=360; double m=(dist>0.001)?asin(dz/dist)*180/M_PI:0;
-                            char line[256]; sprintf(line, "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     \033[1;31mWARN: Gravitational Shear\033[0m\n", "B-Hole", h+3000, tx, ty, tz, dist, hh, m); strcat(b, line);
+                            char line[256]; snprintf(line, sizeof(line), "%-10s %-5d [%.1f,%.1f,%.1f] %-5.1f %03.0f / %+03.0f     \033[1;31mWARN: Gravitational Shear\033[0m\n", "B-Hole", h+3000, tx, ty, tz, dist, hh, m); 
+                            strncat(b, line, sizeof(b)-strlen(b)-1);
                         }
-                        strcat(b, "-------------------------------------------------------------------\n");
+                        strncat(b, "-------------------------------------------------------------------\n", sizeof(b)-strlen(b)-1);
                         send_server_msg(i, "COMPUTER", b);
                     } else if (strcmp(cmd, "lrs") == 0) {
                         char rep[4096] = "\033[1;36m\n--- 3D LONG RANGE SENSOR SCAN ---\n\033[0m";
@@ -453,58 +537,111 @@ int main(int argc, char *argv[]) {
                         double ps2 = players[i].state.s2;
                         double ps3 = players[i].state.s3;
 
-                        for (int l = pq3 + 1; l >= pq3 - 1; l--) {
-                            if (l < 1 || l > 10) continue;
-                            sprintf(line, "\033[1;37m\n[ DECK Z:%d ]\n\033[0m", l); strcat(rep, line);
-                            strcat(rep, "         X-1 (West)               X (Center)               X+1 (East)\n");
-                            
-                            for (int y = pq2 - 1; y <= pq2 + 1; y++) {
-                                if (y == pq2 - 1) strcat(rep, "Y-1 (N) ");
-                                else if (y == pq2) strcat(rep, "Y   (C) ");
-                                else strcat(rep, "Y+1 (S) ");
-                                
-                                for (int x = pq1 - 1; x <= pq1 + 1; x++) {
-                                    if (x >= 1 && x <= 10 && y >= 1 && y <= 10) {
-                                        /* Dynamic counts */
-                                        int bh_cnt = 0; for(int h=0;h<MAX_BH;h++) if(black_holes[h].active && black_holes[h].q1==x && black_holes[h].q2==y && black_holes[h].q3==l) bh_cnt++;
-                                        int p_cnt = 0; for(int p=0;p<MAX_PLANETS;p++) if(planets[p].active && planets[p].q1==x && planets[p].q2==y && planets[p].q3==l) p_cnt++;
-                                        int e_cnt = 0; for(int n=0;n<MAX_NPC;n++) if(npcs[n].active && npcs[n].q1==x && npcs[n].q2==y && npcs[n].q3==l) e_cnt++;
-                                        int b_cnt = 0; for(int b=0;b<MAX_BASES;b++) if(bases[b].active && bases[b].q1==x && bases[b].q2==y && bases[b].q3==l) b_cnt++;
-                                        int u_cnt = 0; for(int u=0;u<MAX_CLIENTS;u++) if(players[u].active && players[u].state.q1==x && players[u].state.q2==y && players[u].state.q3==l) u_cnt++;
-                                        int s_cnt_dyn = 0; for(int s=0;s<MAX_STARS;s++) if(stars_data[s].active && stars_data[s].q1==x && stars_data[s].q2==y && stars_data[s].q3==l) s_cnt_dyn++;
-                                        
-                                        int final_val = (bh_cnt > 0 ? 1 : 0)*10000 + p_cnt*1000 + (e_cnt + u_cnt)*100 + b_cnt*10 + s_cnt_dyn;
+                                                for (int l = pq3 + 1; l >= pq3 - 1; l--) {
 
-                                        /* Accurate Ballistic Heading */
-                                        int h = -1;
-                                        if (y == pq2 - 1) { /* North */
-                                            if (x == pq1 - 1) h = 315; else if (x == pq1) h = 0; else h = 45;
-                                        } else if (y == pq2) { /* Center */
-                                            if (x == pq1 - 1) h = 270; else if (x == pq1 + 1) h = 90;
-                                        } else if (y == pq2 + 1) { /* South */
-                                            if (x == pq1 - 1) h = 225; else if (x == pq1) h = 180; else h = 135;
-                                        }
+                                                    if (l < 1 || l > 10) continue;
 
-                                        double dx_s = (x - pq1) * 10.0 + (5.5 - ps1);
-                                        double dy_s = (pq2 - y) * 10.0 + (ps2 - 5.5);
-                                        double dz_s = (l - pq3) * 10.0 + (5.5 - ps3);
-                                        double dist_s = sqrt(dx_s*dx_s + dy_s*dy_s + dz_s*dz_s);
-                                        double w_req = dist_s / 10.0;
-                                        int m = (dist_s > 0.001) ? (int)(asin(dz_s / dist_s) * 180.0 / M_PI) : 0;
+                                                    snprintf(line, sizeof(line), "\033[1;37m\n[ DECK Z:%d ]\n\033[0m", l); strncat(rep, line, sizeof(rep)-strlen(rep)-1);
 
-                                        if (x == pq1 && y == pq2 && l == pq3) {
-                                            strcat(rep, ":[        \033[1;34mYOU\033[0m         ]: ");
-                                        } else {
-                                            sprintf(line, "[%05d/H%03d/M%+03d/W%.1f]: ", final_val, (h==-1?0:h), m, w_req);
-                                            strcat(rep, line);
-                                        }
-                                    } else {
-                                        strcat(rep, "[:        ***         ]: ");
-                                    }
-                                }
-                                strcat(rep, "\n");
-                            }
-                        }
+                                                    strncat(rep, "         X-1 (West)               X (Center)               X+1 (East)\n", sizeof(rep)-strlen(rep)-1);
+
+                                                    
+
+                                                    for (int y = pq2 - 1; y <= pq2 + 1; y++) {
+
+                                                        if (y == pq2 - 1) strncat(rep, "Y-1 (N) ", sizeof(rep)-strlen(rep)-1);
+
+                                                        else if (y == pq2) strncat(rep, "Y   (C) ", sizeof(rep)-strlen(rep)-1);
+
+                                                        else strncat(rep, "Y+1 (S) ", sizeof(rep)-strlen(rep)-1);
+
+                                                        
+
+                                                        for (int x = pq1 - 1; x <= pq1 + 1; x++) {
+
+                                                            if (x >= 1 && x <= 10 && y >= 1 && y <= 10) {
+
+                                                                /* Dynamic counts */
+
+                                                                int bh_cnt = 0; for(int h=0;h<MAX_BH;h++) if(black_holes[h].active && black_holes[h].q1==x && black_holes[h].q2==y && black_holes[h].q3==l) bh_cnt++;
+
+                                                                int p_cnt = 0; for(int p=0;p<MAX_PLANETS;p++) if(planets[p].active && planets[p].q1==x && planets[p].q2==y && planets[p].q3==l) p_cnt++;
+
+                                                                int e_cnt = 0; for(int n=0;n<MAX_NPC;n++) if(npcs[n].active && npcs[n].q1==x && npcs[n].q2==y && npcs[n].q3==l) e_cnt++;
+
+                                                                int b_cnt = 0; for(int b=0;b<MAX_BASES;b++) if(bases[b].active && bases[b].q1==x && bases[b].q2==y && bases[b].q3==l) b_cnt++;
+
+                                                                int u_cnt = 0; for(int u=0;u<MAX_CLIENTS;u++) if(players[u].active && players[u].state.q1==x && players[u].state.q2==y && players[u].state.q3==l) u_cnt++;
+
+                                                                int s_cnt_dyn = 0; for(int s=0;s<MAX_STARS;s++) if(stars_data[s].active && stars_data[s].q1==x && stars_data[s].q2==y && stars_data[s].q3==l) s_cnt_dyn++;
+
+                                                                
+
+                                                                int final_val = (bh_cnt > 0 ? 1 : 0)*10000 + p_cnt*1000 + (e_cnt + u_cnt)*100 + b_cnt*10 + s_cnt_dyn;
+
+                        
+
+                                                                /* Accurate Ballistic Heading */
+
+                                                                int h = -1;
+
+                                                                if (y == pq2 - 1) { /* North */
+
+                                                                    if (x == pq1 - 1) h = 315; else if (x == pq1) h = 0; else h = 45;
+
+                                                                } else if (y == pq2) { /* Center */
+
+                                                                    if (x == pq1 - 1) h = 270; else if (x == pq1 + 1) h = 90;
+
+                                                                } else if (y == pq2 + 1) { /* South */
+
+                                                                    if (x == pq1 - 1) h = 225; else if (x == pq1) h = 180; else h = 135;
+
+                                                                }
+
+                        
+
+                                                                double dx_s = (x - pq1) * 10.0 + (5.5 - ps1);
+
+                                                                double dy_s = (pq2 - y) * 10.0 + (ps2 - 5.5);
+
+                                                                double dz_s = (l - pq3) * 10.0 + (5.5 - ps3);
+
+                                                                double dist_s = sqrt(dx_s*dx_s + dy_s*dy_s + dz_s*dz_s);
+
+                                                                double w_req = dist_s / 10.0;
+
+                                                                int m = (dist_s > 0.001) ? (int)(asin(dz_s / dist_s) * 180.0 / M_PI) : 0;
+
+                        
+
+                                                                if (x == pq1 && y == pq2 && l == pq3) {
+
+                                                                    strncat(rep, ":[        \033[1;34mYOU\033[0m         ]: ", sizeof(rep)-strlen(rep)-1);
+
+                                                                } else {
+
+                                                                    snprintf(line, sizeof(line), "[%05d/H%03d/M%+03d/W%.1f]: ", final_val, (h==-1?0:h), m, w_req);
+
+                                                                    strncat(rep, line, sizeof(rep)-strlen(rep)-1);
+
+                                                                }
+
+                                                            } else {
+
+                                                                strncat(rep, "[:        ***         ]: ", sizeof(rep)-strlen(rep)-1);
+
+                                                            }
+
+                                                        }
+
+                                                        strncat(rep, "\n", sizeof(rep)-strlen(rep)-1);
+
+                                                    }
+
+                                                }
+
+                        
                         send_server_msg(i, "SCIENCE", rep);
                     } else if (strncmp(cmd, "pha ", 4) == 0) {
                         int e_fire; if (sscanf(cmd,"pha %d",&e_fire)==1 && players[i].state.energy>=e_fire) {
@@ -613,7 +750,7 @@ int main(int argc, char *argv[]) {
                             }
                             send_server_msg(i, "COMMUNICATIONS", "Enemy vessel has surrendered after Corbomite bluff.");
                         } else {
-                            PacketMessage msg = {PKT_MESSAGE, "", players[i].faction, 0, ""};
+                            PacketMessage msg = {PKT_MESSAGE, "", players[i].faction, 0, 0, ""};
                             strncpy(msg.from, players[i].name, 63); strncpy(msg.text, "Corbomite device armed. Surrender now!", 1023);
                             broadcast_message(&msg);
                             send_server_msg(i, "COMMUNICATIONS", "Bluff failed. Enemies remain hostile.");
@@ -691,13 +828,16 @@ int main(int argc, char *argv[]) {
                     } else if (strcmp(cmd, "har") == 0) {
                         bool near = false;
                         for(int h=0; h<MAX_BH; h++) if(black_holes[h].active && black_holes[h].q1==players[i].state.q1 && black_holes[h].q2==players[i].state.q2 && black_holes[h].q3==players[i].state.q3) {
-                            double d=sqrt(pow(black_holes[h].x-players[i].state.s1,2)+pow(black_holes[h].y-players[i].state.s2,2)+pow(black_holes[h].z-players[i].state.s3,2));
-                            if(d<2.0) { near=true; break; }
+                            double dx = black_holes[h].x-players[i].state.s1;
+                            double dy = black_holes[h].y-players[i].state.s2;
+                            double dz = black_holes[h].z-players[i].state.s3;
+                            if((dx*dx + dy*dy + dz*dz) < 4.0) { near=true; break; }
                         }
                         if(near) {
+                            players[i].state.energy += 1000; if(players[i].state.energy > 5000) players[i].state.energy = 5000;
                             players[i].state.inventory[1] += 50; /* Dilithium */
                             int s_idx = rand()%6; players[i].state.shields[s_idx] -= 300; if(players[i].state.shields[s_idx]<0) players[i].state.shields[s_idx]=0;
-                            send_server_msg(i, "ENGINEERING", "Antimatter harvest successful. High gravitational stress recorded.");
+                            send_server_msg(i, "ENGINEERING", "Antimatter harvest successful. Energy surge detected, high gravitational stress recorded.");
                         } else send_server_msg(i, "COMPUTER", "No black hole in range.");
                     } else if (strcmp(cmd, "inv") == 0) {
                         char b[256]="Inv: "; char it[32]; const char* r[]={"-","Dil","Tri","Ver","Mon","Iso","Gas"};
@@ -761,7 +901,7 @@ int main(int argc, char *argv[]) {
                                     players[i].target_gx = cur_gx + players[i].dx * move_d;
                                     players[i].target_gy = cur_gy + players[i].dy * move_d;
                                     players[i].target_gz = cur_gz + players[i].dz * move_d;
-                                    players[i].nav_state = NAV_STATE_ALIGN; players[i].nav_timer = 40;
+                                    players[i].nav_state = NAV_STATE_ALIGN; players[i].nav_timer = 60;
                                     send_server_msg(i, "HELMSMAN", "Autopilot engaged. Approaching target.");
                                 } else send_server_msg(i, "COMPUTER", "Already at or within target distance.");
                             } else send_server_msg(i, "COMPUTER", "Target ID not found.");
@@ -816,7 +956,7 @@ int main(int argc, char *argv[]) {
                     } else if (strcmp(cmd, "xxx") == 0) {
                         send_server_msg(i, "SERVER", "Self-destruct sequence initiated. Goodbye, Captain.");
                         char b_msg[128]; sprintf(b_msg, "Massive explosion detected: Vessel %s has self-destructed.", players[i].name);
-                        PacketMessage mpkt = {PKT_MESSAGE, "COMMUNICATIONS", 0, 0, ""};
+                        PacketMessage mpkt = {PKT_MESSAGE, "COMMUNICATIONS", 0, 0, 0, ""};
                         strcpy(mpkt.text, b_msg);
                         broadcast_message(&mpkt);
                         

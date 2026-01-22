@@ -145,53 +145,52 @@ void *network_listener(void *arg) {
             
             if (g_shared_state) {
                 pthread_mutex_lock(&g_shared_state->mutex);
-                /* Sincronizziamo lo stato locale con i dati del server */
-                g_shared_state->shm_energy = upd.local_view.energy;
+                /* Sincronizziamo lo stato locale con i dati ottimizzati dal server */
+                g_shared_state->shm_energy = upd.energy;
                 int total_s = 0;
                 for(int s=0; s<6; s++) {
-                    g_shared_state->shm_shields[s] = upd.local_view.shields[s];
-                    total_s += upd.local_view.shields[s];
+                    g_shared_state->shm_shields[s] = upd.shields[s];
+                    total_s += upd.shields[s];
                 }
-                g_shared_state->klingons = upd.local_view.k9;
-                g_shared_state->is_cloaked = upd.local_view.is_cloaked;
-                sprintf(g_shared_state->quadrant, "Q-%d-%d-%d", upd.local_view.q1, upd.local_view.q2, upd.local_view.q3);
-                for(int r=0; r<7; r++) g_shared_state->inventory[r] = upd.local_view.inventory[r];
+                g_shared_state->is_cloaked = upd.is_cloaked;
+                sprintf(g_shared_state->quadrant, "Q-%d-%d-%d", upd.q1, upd.q2, upd.q3);
 
-                g_shared_state->object_count = upd.local_view.object_count;
-                for (int o=0; o < upd.local_view.object_count; o++) {
-                    g_shared_state->objects[o].shm_x = upd.local_view.objects[o].shm_x;
-                    g_shared_state->objects[o].shm_y = upd.local_view.objects[o].shm_y;
-                    g_shared_state->objects[o].shm_z = upd.local_view.objects[o].shm_z;
-                    g_shared_state->objects[o].h = upd.local_view.objects[o].h;
-                    g_shared_state->objects[o].m = upd.local_view.objects[o].m;
-                    g_shared_state->objects[o].type = upd.local_view.objects[o].type;
-                    g_shared_state->objects[o].ship_class = upd.local_view.objects[o].ship_class;
+                g_shared_state->object_count = upd.object_count;
+                for (int o=0; o < upd.object_count; o++) {
+                    g_shared_state->objects[o].shm_x = upd.objects[o].shm_x;
+                    g_shared_state->objects[o].shm_y = upd.objects[o].shm_y;
+                    g_shared_state->objects[o].shm_z = upd.objects[o].shm_z;
+                    g_shared_state->objects[o].h = upd.objects[o].h;
+                    g_shared_state->objects[o].m = upd.objects[o].m;
+                    g_shared_state->objects[o].type = upd.objects[o].type;
+                    g_shared_state->objects[o].ship_class = upd.objects[o].ship_class;
                     g_shared_state->objects[o].active = 1;
                 }
-                g_shared_state->beam_count = upd.local_view.beam_count;
-                for (int b=0; b < upd.local_view.beam_count; b++) {
-                    g_shared_state->beams[b].shm_tx = upd.local_view.beams[b].tx;
-                    g_shared_state->beams[b].shm_ty = upd.local_view.beams[b].ty;
-                    g_shared_state->beams[b].shm_tz = upd.local_view.beams[b].tz;
-                    g_shared_state->beams[b].active = upd.local_view.beams[b].active;
+                g_shared_state->beam_count = upd.beam_count;
+                for (int b=0; b < upd.beam_count; b++) {
+                    g_shared_state->beams[b].shm_tx = upd.beams[b].tx;
+                    g_shared_state->beams[b].shm_ty = upd.beams[b].ty;
+                    g_shared_state->beams[b].shm_tz = upd.beams[b].tz;
+                    g_shared_state->beams[b].active = upd.beams[b].active;
                 }
-                g_shared_state->torp.shm_x = upd.local_view.torp.shm_x;
-                g_shared_state->torp.shm_y = upd.local_view.torp.shm_y;
-                g_shared_state->torp.shm_z = upd.local_view.torp.shm_z;
-                g_shared_state->torp.active = upd.local_view.torp.active;
-                g_shared_state->boom.shm_x = upd.local_view.boom.shm_x;
-                g_shared_state->boom.shm_y = upd.local_view.boom.shm_y;
-                                g_shared_state->boom.shm_z = upd.local_view.boom.shm_z;
-                                g_shared_state->boom.active = upd.local_view.boom.active;
+                g_shared_state->torp.shm_x = upd.torp.shm_x;
+                g_shared_state->torp.shm_y = upd.torp.shm_y;
+                g_shared_state->torp.shm_z = upd.torp.shm_z;
+                g_shared_state->torp.active = upd.torp.active;
                 
-                                g_shared_state->dismantle.shm_x = upd.local_view.dismantle.shm_x;
-                                g_shared_state->dismantle.shm_y = upd.local_view.dismantle.shm_y;
-                                g_shared_state->dismantle.shm_z = upd.local_view.dismantle.shm_z;
-                                g_shared_state->dismantle.species = upd.local_view.dismantle.species;
-                                g_shared_state->dismantle.active = upd.local_view.dismantle.active;
-                                
-                                g_shared_state->frame_id++; 
-                                pthread_mutex_unlock(&g_shared_state->mutex);
+                g_shared_state->boom.shm_x = upd.boom.shm_x;
+                g_shared_state->boom.shm_y = upd.boom.shm_y;
+                g_shared_state->boom.shm_z = upd.boom.shm_z;
+                g_shared_state->boom.active = upd.boom.active;
+                
+                g_shared_state->dismantle.shm_x = upd.dismantle.shm_x;
+                g_shared_state->dismantle.shm_y = upd.dismantle.shm_y;
+                g_shared_state->dismantle.shm_z = upd.dismantle.shm_z;
+                g_shared_state->dismantle.species = upd.dismantle.species;
+                g_shared_state->dismantle.active = upd.dismantle.active;
+                
+                g_shared_state->frame_id++; 
+                pthread_mutex_unlock(&g_shared_state->mutex);
                 kill(visualizer_pid, SIGUSR1); 
             }
         }
@@ -336,7 +335,9 @@ int main(int argc, char *argv[]) {
                         printf("har         : Antimatter harvest from Black Hole\n");
                         printf("sta         : Mission Status Report\n");
                         printf("dam         : Detailed Damage Report\n");
-                        printf("rad MSG     : Send Subspace Radio Message\n");
+                        printf("rad MSG     : Send Global Radio Message\n");
+                        printf("rad @Fac MSG: Send to Faction (e.g. @Romulan ...)\n");
+                        printf("rad #ID MSG : Send Private Message to Player ID\n");
                         printf("clo         : Toggle Cloaking Device (Consumes constant Energy)\n");
                         printf("axs / grd   : Toggle 3D Visual Guides\n");
                         printf("xxx         : Self-Destruct\n");
@@ -355,9 +356,44 @@ int main(int argc, char *argv[]) {
                             printf("Grid toggled.\n");
                         }
                     } else if (strncmp(g_input_buf, "rad ", 4) == 0) {
-                        PacketMessage mpkt = {PKT_MESSAGE, "", my_faction, 0, ""};
+                        PacketMessage mpkt = {PKT_MESSAGE, "", my_faction, SCOPE_GLOBAL, 0, ""};
                         strcpy(mpkt.from, captain_name);
-                        strncpy(mpkt.text, g_input_buf + 4, 2047);
+                        
+                        char *msg_start = g_input_buf + 4;
+                        if (msg_start[0] == '@') {
+                            char target_name[64];
+                            int offset = 0;
+                            sscanf(msg_start + 1, "%s%n", target_name, &offset);
+                            if (offset > 0) {
+                                mpkt.scope = SCOPE_FACTION;
+                                if (strcasecmp(target_name, "Federation")==0 || strcasecmp(target_name, "Fed")==0) mpkt.faction = FACTION_FEDERATION;
+                                else if (strcasecmp(target_name, "Klingon")==0 || strcasecmp(target_name, "Kli")==0) mpkt.faction = FACTION_KLINGON;
+                                else if (strcasecmp(target_name, "Romulan")==0 || strcasecmp(target_name, "Rom")==0) mpkt.faction = FACTION_ROMULAN;
+                                else if (strcasecmp(target_name, "Borg")==0 || strcasecmp(target_name, "Bor")==0) mpkt.faction = FACTION_BORG;
+                                else if (strcasecmp(target_name, "Cardassian")==0 || strcasecmp(target_name, "Car")==0) mpkt.faction = FACTION_CARDASSIAN;
+                                else {
+                                    mpkt.scope = SCOPE_GLOBAL; /* Fallback */
+                                }
+                                if (strlen(msg_start) > (1 + offset + 1))
+                                    strncpy(mpkt.text, msg_start + 1 + offset + 1, 2047);
+                                else 
+                                    mpkt.text[0] = '\0';
+                            } else strncpy(mpkt.text, msg_start, 2047);
+                        } else if (msg_start[0] == '#') {
+                            int tid;
+                            int offset = 0;
+                            if (sscanf(msg_start + 1, "%d%n", &tid, &offset) == 1) {
+                                mpkt.scope = SCOPE_PRIVATE;
+                                mpkt.target_id = tid;
+                                if (strlen(msg_start) > (1 + offset + 1))
+                                    strncpy(mpkt.text, msg_start + 1 + offset + 1, 2047);
+                                else 
+                                    mpkt.text[0] = '\0';
+                            } else strncpy(mpkt.text, msg_start, 2047);
+                        } else {
+                            strncpy(mpkt.text, msg_start, 2047);
+                        }
+                        
                         send(sock, &mpkt, sizeof(mpkt), 0);
                     } else {
                         PacketCommand cpkt = {PKT_COMMAND, ""};

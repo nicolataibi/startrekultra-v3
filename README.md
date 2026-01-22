@@ -51,7 +51,13 @@ To solve the problem of asynchronous network messages (e.g., "Incoming Fire!") i
 
 ## Part III: Gameplay & Commands
 
-### 1. Tactical Commands
+### 1. Communications (NEW)
+The new **Subspace Radio System** allows for complex diplomatic and tactical coordination:
+*   **`rad <message>`**: Broadcasts a message on the **Global Frequency** (visible to all).
+*   **`rad @<Faction> <message>`**: Sends an encrypted message to a specific Faction (e.g., `rad @Romulan We propose a treaty`). Supported factions: `Fed`, `Kli`, `Rom`, `Bor`, `Car`.
+*   **`rad #<ID> <message>`**: Establishes a **Private Link** to a specific vessel ID (e.g., `rad #2 Cover me!`). Find IDs using the `srs` command.
+
+### 2. Tactical Commands
 *   **`nav H M W`**: 3D Warp navigation with vector alignment.
 *   **`lock ID`**: Universal target acquisition.
 *   **`pha E`**: Phaser fire with damage scaling based on `pow` allocation and distance.
@@ -60,14 +66,14 @@ To solve the problem of asynchronous network messages (e.g., "Incoming Fire!") i
 *   **`bor`**: Transporter-based boarding parties to capture vessels or starbases.
 *   **`apr ID DIST`**: Advanced autopilot for intercept or orbital insertion.
 
-### 2. Science & Logistics
+### 3. Science & Logistics
 *   **`srs`**: Professional tactical analysis of the quadrant, listing coordinates and vectors for all UIDs.
 *   **`lrs`**: 3D strategic scan of surrounding space.
 *   **`min` / `sco` / `har`**: Resource acquisition from planets, stars (Energy), and black holes (Dilithium).
 *   **`con`**: Conversion of raw materials into ship resources (Monotanium, Isolinear Crystals, Gas).
 *   **`aux probe`**: Remote sensor deployment.
 
-### 3. Faction System
+### 4. Faction System
 Captains can choose between **Federation, Klingon, Romulan, and Borg**, each influencing ship models and starting parameters. NPC factions will retaliate if provoked or if players enter their territory.
 
 ---
