@@ -157,9 +157,9 @@ void *network_listener(void *arg) {
 
                 g_shared_state->object_count = upd.object_count;
                 for (int o=0; o < upd.object_count; o++) {
-                    g_shared_state->objects[o].shm_x = upd.objects[o].shm_x;
-                    g_shared_state->objects[o].shm_y = upd.objects[o].shm_y;
-                    g_shared_state->objects[o].shm_z = upd.objects[o].shm_z;
+                    g_shared_state->objects[o].shm_x = upd.objects[o].net_x;
+                    g_shared_state->objects[o].shm_y = upd.objects[o].net_y;
+                    g_shared_state->objects[o].shm_z = upd.objects[o].net_z;
                     g_shared_state->objects[o].h = upd.objects[o].h;
                     g_shared_state->objects[o].m = upd.objects[o].m;
                     g_shared_state->objects[o].type = upd.objects[o].type;
@@ -174,9 +174,9 @@ void *network_listener(void *arg) {
                     for (int b=0; b < upd.beam_count; b++) {
                         if (g_shared_state->beam_count < MAX_BEAMS) {
                             int idx = g_shared_state->beam_count;
-                            g_shared_state->beams[idx].shm_tx = upd.beams[b].tx;
-                            g_shared_state->beams[idx].shm_ty = upd.beams[b].ty;
-                            g_shared_state->beams[idx].shm_tz = upd.beams[b].tz;
+                            g_shared_state->beams[idx].shm_tx = upd.beams[b].net_tx;
+                            g_shared_state->beams[idx].shm_ty = upd.beams[b].net_ty;
+                            g_shared_state->beams[idx].shm_tz = upd.beams[b].net_tz;
                             g_shared_state->beams[idx].active = upd.beams[b].active;
                             g_shared_state->beam_count++;
                         }
@@ -184,23 +184,23 @@ void *network_listener(void *arg) {
                 }
                 
                 /* Projectile position */
-                g_shared_state->torp.shm_x = upd.torp.shm_x;
-                g_shared_state->torp.shm_y = upd.torp.shm_y;
-                g_shared_state->torp.shm_z = upd.torp.shm_z;
+                g_shared_state->torp.shm_x = upd.torp.net_x;
+                g_shared_state->torp.shm_y = upd.torp.net_y;
+                g_shared_state->torp.shm_z = upd.torp.net_z;
                 g_shared_state->torp.active = upd.torp.active;
                 
                 /* Event Latching (Visualizer will clear these) */
                 if (upd.boom.active) {
-                    g_shared_state->boom.shm_x = upd.boom.shm_x;
-                    g_shared_state->boom.shm_y = upd.boom.shm_y;
-                    g_shared_state->boom.shm_z = upd.boom.shm_z;
+                    g_shared_state->boom.shm_x = upd.boom.net_x;
+                    g_shared_state->boom.shm_y = upd.boom.net_y;
+                    g_shared_state->boom.shm_z = upd.boom.net_z;
                     g_shared_state->boom.active = 1;
                 }
                 
                 if (upd.dismantle.active) {
-                    g_shared_state->dismantle.shm_x = upd.dismantle.shm_x;
-                    g_shared_state->dismantle.shm_y = upd.dismantle.shm_y;
-                    g_shared_state->dismantle.shm_z = upd.dismantle.shm_z;
+                    g_shared_state->dismantle.shm_x = upd.dismantle.net_x;
+                    g_shared_state->dismantle.shm_y = upd.dismantle.net_y;
+                    g_shared_state->dismantle.shm_z = upd.dismantle.net_z;
                     g_shared_state->dismantle.species = upd.dismantle.species;
                     g_shared_state->dismantle.active = 1;
                 }

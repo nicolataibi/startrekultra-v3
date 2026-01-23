@@ -322,7 +322,8 @@ void drawHUD(float x, float y, float z, int type, int id, int hp) {
             float w = 40.0f;
             float h = 4.0f;
             float bar = (hp / 100.0f) * w;
-            if (bar < 0) bar = 0; if (bar > w) bar = w;
+            if (bar < 0) bar = 0; 
+            if (bar > w) bar = w;
 
             /* Border */
             glColor3f(0.5f, 0.5f, 0.5f);

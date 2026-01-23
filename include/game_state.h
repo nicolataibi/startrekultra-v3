@@ -7,12 +7,12 @@
 #define MAX_NET_BEAMS 8
 
 typedef struct {
-    float tx, ty, tz;
+    float net_tx, net_ty, net_tz;
     int active;
 } NetBeam;
 
 typedef struct {
-    float shm_x, shm_y, shm_z;
+    float net_x, net_y, net_z;
     float h, m;
     int type;       /* 1=Player, 3=Base, 4=Star, 5=Planet, etc */
     int ship_class; /* Specifica il modello 3D (es. Galaxy, Constitution) */
@@ -22,12 +22,12 @@ typedef struct {
 } NetObject;
 
 typedef struct {
-    float shm_x, shm_y, shm_z;
+    float net_x, net_y, net_z;
     int active;
 } NetPoint;
 
 typedef struct {
-    float shm_x, shm_y, shm_z;
+    float net_x, net_y, net_z;
     int species;
     int active;
 } NetDismantle;

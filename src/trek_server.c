@@ -929,7 +929,7 @@ int main(int argc, char *argv[]) {
                                 ty = players[i].state.s2+cos(players[i].state.ent_m*M_PI/180.0)*-cos(players[i].state.ent_h*M_PI/180.0)*5.0;
                                 tz = players[i].state.s3+sin(players[i].state.ent_m*M_PI/180.0)*5.0;
                             }
-                            players[i].state.beams[0].tx=tx; players[i].state.beams[0].ty=ty; players[i].state.beams[0].tz=tz;
+                players[i].state.beams[0].net_tx=tx; players[i].state.beams[0].net_ty=ty; players[i].state.beams[0].net_tz=tz;
                             send_server_msg(i, "TACTICAL", "Phasers fired.");
                             /* Danno Phasers - influenzato dalla potenza assegnata alle armi */
                             double d = sqrt(pow(tx-players[i].state.s1,2)+pow(ty-players[i].state.s2,2)+pow(tz-players[i].state.s3,2));
